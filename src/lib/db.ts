@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
+import { buildDashboardInsights, percentage } from "@/lib/dashboard";
+import type { DashboardAnalytics, DashboardSummary, DistributionItem, QualityMetric } from "@/types/dashboard";
 import type { MaterialAttributes, MaterialCandidate, MaterialImportRow } from "@/types/material";
 
 let schemaPromise: Promise<void> | null = null;
@@ -289,5 +291,103 @@ export async function getMaterialStats() {
     active: Number(counts[0]?.active || 0),
     uploads: Number(counts[0]?.uploads || 0),
     lastUpload: latest[0] || null,
+  };
+}
+
+const readinessExpression = `
+  CASE WHEN nullif(long_description, '') IS NOT NULL THEN 20 ELSE 0 END +
+  CASE WHEN nullif(attributes->>'itemType', '') IS NOT NULL THEN 15 ELSE 0 END +
+  CASE WHEN nullif(attributes->>'subtype', '') IS NOT NULL THEN 10 ELSE 0 END +
+  CASE WHEN nullif(attributes->>'sizeMm', '') IS NOT NULL THEN 15 ELSE 0 END +
+  CASE WHEN nullif(attributes->>'pressureClass', '') IS NOT NULL OR nullif(attributes->>'pressureBar', '') IS NOT NULL THEN 10 ELSE 0 END +
+  CASE WHEN nullif(attributes->>'connection', '') IS NOT NULL THEN 10 ELSE 0 END +
+  CASE WHEN jsonb_array_length(coalesce(attributes->'materials', '[]'::jsonb)) > 0 THEN 10 ELSE 0 END +
+  CASE WHEN jsonb_array_length(coalesce(attributes->'standards', '[]'::jsonb)) > 0 THEN 5 ELSE 0 END +
+  CASE WHEN nullif(attributes->>'actuation', '') IS NOT NULL THEN 5 ELSE 0 END
+`;
+
+function distribution(rows: Record<string, unknown>[], total: number): DistributionItem[] {
+  return rows.map((row) => ({
+    label: String(row.label || "UNSPECIFIED"),
+    count: Number(row.count || 0),
+    percentage: percentage(Number(row.count || 0), total),
+    active: row.active == null ? undefined : Number(row.active),
+    inactive: row.inactive == null ? undefined : Number(row.inactive),
+    readiness: row.readiness == null ? undefined : Math.round(Number(row.readiness) * 10) / 10,
+  }));
+}
+
+export async function getDashboardAnalytics(): Promise<DashboardAnalytics> {
+  await ensureSchema();
+  const sql = getSql();
+  const currentUpload = `(SELECT current_upload_id FROM material_settings WHERE id = 1)`;
+  const [summaryRows, uploadRows, statusRows, classRows, plantRows, materialTypeRows, qualityRows, readinessRows] = await Promise.all([
+    sql.query(`SELECT
+      count(*)::int AS total,
+      count(*) FILTER (WHERE status_active)::int AS active,
+      count(DISTINCT (corporate_no, sap_no))::int AS unique_materials,
+      count(DISTINCT nullif(plant, ''))::int AS plants,
+      count(DISTINCT nullif(class_name, ''))::int AS classes,
+      count(*) FILTER (WHERE status_active AND embedding IS NOT NULL)::int AS embedded,
+      coalesce(avg((${readinessExpression})) FILTER (WHERE status_active), 0)::double precision AS readiness
+      FROM materials WHERE upload_id = ${currentUpload}`),
+    sql.query(`SELECT u.file_name, u.sheet_name, u.row_count, u.active_count, u.created_at FROM material_uploads u JOIN material_settings s ON s.current_upload_id = u.id WHERE s.id = 1`),
+    sql.query(`SELECT coalesce(nullif(status, ''), 'UNSPECIFIED') AS label, count(*)::int AS count, count(*) FILTER (WHERE status_active)::int AS active, count(*) FILTER (WHERE NOT status_active)::int AS inactive FROM materials WHERE upload_id = ${currentUpload} GROUP BY status ORDER BY count DESC`),
+    sql.query(`SELECT coalesce(nullif(class_name, ''), 'UNSPECIFIED') AS label, count(*)::int AS count, count(*) FILTER (WHERE status_active)::int AS active, count(*) FILTER (WHERE NOT status_active)::int AS inactive, coalesce(avg((${readinessExpression})) FILTER (WHERE status_active), 0)::double precision AS readiness FROM materials WHERE upload_id = ${currentUpload} GROUP BY class_name ORDER BY count DESC LIMIT 12`),
+    sql.query(`SELECT coalesce(nullif(plant, ''), 'UNSPECIFIED') AS label, count(*)::int AS count, count(*) FILTER (WHERE status_active)::int AS active, count(*) FILTER (WHERE NOT status_active)::int AS inactive FROM materials WHERE upload_id = ${currentUpload} GROUP BY plant ORDER BY count DESC LIMIT 12`),
+    sql.query(`SELECT coalesce(nullif(material_type, ''), 'UNSPECIFIED') AS label, count(*)::int AS count FROM materials WHERE upload_id = ${currentUpload} GROUP BY material_type ORDER BY count DESC LIMIT 10`),
+    sql.query(`SELECT
+      count(*) FILTER (WHERE nullif(long_description, '') IS NOT NULL)::int AS description,
+      count(*) FILTER (WHERE nullif(attributes->>'itemType', '') IS NOT NULL)::int AS item_type,
+      count(*) FILTER (WHERE nullif(attributes->>'subtype', '') IS NOT NULL)::int AS subtype,
+      count(*) FILTER (WHERE nullif(attributes->>'sizeMm', '') IS NOT NULL)::int AS size,
+      count(*) FILTER (WHERE nullif(attributes->>'pressureClass', '') IS NOT NULL OR nullif(attributes->>'pressureBar', '') IS NOT NULL)::int AS pressure,
+      count(*) FILTER (WHERE nullif(attributes->>'connection', '') IS NOT NULL)::int AS connection,
+      count(*) FILTER (WHERE jsonb_array_length(coalesce(attributes->'materials', '[]'::jsonb)) > 0)::int AS materials,
+      count(*) FILTER (WHERE jsonb_array_length(coalesce(attributes->'standards', '[]'::jsonb)) > 0)::int AS standards,
+      count(*) FILTER (WHERE nullif(attributes->>'faceToFaceMm', '') IS NOT NULL)::int AS face_to_face,
+      count(*) FILTER (WHERE nullif(attributes->>'actuation', '') IS NOT NULL)::int AS actuation
+      FROM materials WHERE upload_id = ${currentUpload} AND status_active`),
+    sql.query(`WITH readiness AS (SELECT (${readinessExpression}) AS score FROM materials WHERE upload_id = ${currentUpload} AND status_active) SELECT CASE WHEN score >= 70 THEN 'Strong' WHEN score >= 40 THEN 'Partial' ELSE 'Sparse' END AS label, count(*)::int AS count FROM readiness GROUP BY 1 ORDER BY min(score) DESC`),
+  ]);
+  const source = summaryRows[0] || {};
+  const total = Number(source.total || 0);
+  const searchable = Number(source.active || 0);
+  const unique = Number(source.unique_materials || 0);
+  const embedded = Number(source.embedded || 0);
+  const summary: DashboardSummary = {
+    totalRecords: total,
+    searchableRecords: searchable,
+    excludedRecords: total - searchable,
+    searchableRate: percentage(searchable, total),
+    uniqueMaterials: unique,
+    duplicateRows: total - unique,
+    plants: Number(source.plants || 0),
+    classes: Number(source.classes || 0),
+    embeddedRecords: embedded,
+    embeddingCoverage: percentage(embedded, searchable),
+    matchReadiness: Math.round(Number(source.readiness || 0) * 10) / 10,
+  };
+  const qualitySource = qualityRows[0] || {};
+  const qualityDefinitions: Array<[string, string, boolean]> = [
+    ["description", "Long description", true], ["item_type", "Item type", true], ["subtype", "Subtype", false],
+    ["size", "Size / DN", true], ["pressure", "Pressure rating", true], ["connection", "Connection", true],
+    ["materials", "Materials of construction", true], ["standards", "Standards / norms", false],
+    ["face_to_face", "Face-to-face", false], ["actuation", "Actuation", false],
+  ];
+  const qualityMetrics: QualityMetric[] = qualityDefinitions.map(([key, label, critical]) => ({ key, label, critical, count: Number(qualitySource[key] || 0), percentage: percentage(Number(qualitySource[key] || 0), searchable) }));
+  const classDistribution = distribution(classRows, total);
+  const upload = uploadRows[0] ? {
+    fileName: String(uploadRows[0].file_name), sheetName: String(uploadRows[0].sheet_name), rowCount: Number(uploadRows[0].row_count), activeCount: Number(uploadRows[0].active_count), createdAt: new Date(String(uploadRows[0].created_at)).toISOString(),
+  } : null;
+  return {
+    generatedAt: new Date().toISOString(), upload, summary,
+    statusDistribution: distribution(statusRows, total),
+    classDistribution,
+    plantDistribution: distribution(plantRows, total),
+    materialTypeDistribution: distribution(materialTypeRows, total),
+    qualityMetrics,
+    readinessDistribution: distribution(readinessRows, searchable),
+    insights: buildDashboardInsights(summary, qualityMetrics, classDistribution),
   };
 }

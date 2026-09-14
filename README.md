@@ -12,6 +12,7 @@ Engineering-aware SAP material matching built with Next.js, Neon Postgres, and t
 - Combines deterministic weighted engineering scoring with Gemini semantic embeddings
 - Shows exact, compatible, missing, and mismatched attributes
 - Exports ranked results to Excel or the browser PDF print flow
+- Provides a dedicated `/dashboard` with total/searchable/excluded counts, status and class distributions, plant and ERP-type analysis, attribute coverage, readiness tiers, embedding coverage, and prioritized quality insights
 
 ## Setup
 
@@ -34,6 +35,12 @@ npm run dev
 ```
 
 The application creates the required Neon extensions, tables, and indexes on first use. The equivalent SQL is in `database/schema.sql`.
+
+## Analytics dashboard
+
+Open `/dashboard` to analyze the active material master. Dashboard calculations always use the current promoted upload and distinguish all imported rows from records eligible for normal matching. The API representation is available from `GET /api/dashboard`.
+
+The readiness score measures description, item type, subtype, size, pressure, connection, materials, standards, and actuation coverage. It is a data-completeness indicator, not a probability that a material is correct.
 
 ## Upload replacement behavior
 

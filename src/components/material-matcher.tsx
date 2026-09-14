@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowRight, Check, ChevronDown, Clipboard, CloudUpload, Database, Download, FileSpreadsheet, LoaderCircle, Printer, Search, ShieldCheck, Sparkles, TriangleAlert, X } from "lucide-react";
+import { AlertCircle, ArrowRight, BarChart3, Check, ChevronDown, Clipboard, CloudUpload, Database, Download, FileSpreadsheet, LoaderCircle, Printer, Search, ShieldCheck, Sparkles, TriangleAlert, X } from "lucide-react";
 import type { MaterialAttributes, MaterialMatch, SearchResponse, UploadSummary } from "@/types/material";
 
 interface Stats {
@@ -170,7 +171,7 @@ export default function MaterialMatcher() {
       <header className="border-b border-white/10 bg-[#0e2823] text-white print:hidden">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 lg:px-8">
           <div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl bg-emerald-400 text-emerald-950"><Sparkles size={21} /></div><div><div className="text-sm font-bold tracking-tight">Material Match AI</div><div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-300">SAP Intelligence</div></div></div>
-          <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs text-emerald-100"><span className={`h-2 w-2 rounded-full ${stats.configured && !stats.error ? "bg-emerald-400" : "bg-amber-400"}`} />{stats.configured ? `${formatNumber(stats.active)} active records` : "Neon setup required"}</div>
+          <div className="flex items-center gap-2"><Link href="/dashboard" className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-emerald-100 hover:bg-white/10"><BarChart3 size={14} />Dashboard</Link><div className="hidden items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs text-emerald-100 sm:flex"><span className={`h-2 w-2 rounded-full ${stats.configured && !stats.error ? "bg-emerald-400" : "bg-amber-400"}`} />{stats.configured ? `${formatNumber(stats.materials)} total · ${formatNumber(stats.active)} searchable` : "Neon setup required"}</div></div>
         </div>
       </header>
 

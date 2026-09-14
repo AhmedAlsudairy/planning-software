@@ -7,3 +7,11 @@ This version has breaking changes — APIs, conventions, and file structure may 
 This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
 
 <!-- END:nextjs-agent-rules -->
+
+## Project workflow
+
+- Run `npm run verify` before committing; it executes lint, typecheck, Vitest, and the production build.
+- Material imports are atomically promoted in Neon and concurrent imports are rejected with a database lock.
+- `/dashboard` and `GET /api/dashboard` analyze only the current promoted upload.
+- Dashboard readiness is a completeness indicator, not a calibrated match probability.
+- Keep `DATABASE_URL` and `GEMINI_API_KEY` in ignored environment files; never commit ERP spreadsheets or credentials.
