@@ -1,7 +1,9 @@
 import type { MaterialAttributes } from "@/types/material";
 
 const CONNECTIONS = ["DOUBLE FLANGED", "FLANGED", "FLANGE", "WAFER", "LUG", "THREADED", "SCREWED", "SOCKET WELD", "BUTT WELD", "BSP", "NPT", "RTJ", "RF"];
-const SUBTYPES = ["BUTTERFLY", "SOLENOID", "CHECK", "CONTROL", "RELIEF", "BALL", "GATE", "GLOBE", "NEEDLE", "PLUG", "DIAPHRAGM", "KNIFE GATE", "NON RETURN"];
+// Used only when no data-derived vocabulary is available (e.g. tests, or before the first import).
+// db.ts:getSubtypeVocabulary() supersedes this at runtime by learning subtype terms from class_name.
+const FALLBACK_SUBTYPES = ["BUTTERFLY", "SOLENOID", "CHECK", "CONTROL", "RELIEF", "BALL", "GATE", "GLOBE", "NEEDLE", "PLUG", "DIAPHRAGM", "KNIFE GATE", "NON RETURN"];
 const ACTUATIONS = ["ELECTRIC", "PNEUMATIC", "HYDRAULIC", "MANUAL", "LEVER", "GEAR OPERATED", "GEARBOX", "AUTOMATIC", "PILOT OPERATED"];
 const KNOWN_MATERIALS = ["CF8M", "CF8", "SS 316L", "SS316L", "SS 316", "SS316", "SS 304", "SS304", "SS", "STAINLESS STEEL", "DUCTILE IRON", "NODULAR CI", "CAST IRON", "CI", "DI", "EPDM", "NBR", "PTFE", "PFA", "VITON", "FKM", "BRONZE", "BRASS", "WCB", "WC6", "CS", "PVC", "CPVC"];
 
@@ -43,6 +45,8 @@ function canonicalMaterial(value: string | null): string | null {
 function parseSize(text: string): Pick<MaterialAttributes, "sizeMm" | "sizeDisplay"> {
   const dn = text.match(/\bDN\s*[-:]?\s*(\d+(?:\.\d+)?)\b/i);
   if (dn) return { sizeMm: Number(dn[1]), sizeDisplay: `DN${displayNumber(Number(dn[1]))}` };
+  const nb = text.match(/\b(\d+(?:\.\d+)?)\s*NB\b/i) || text.match(/\bNB\s*[-:]?\s*(\d+(?:\.\d+)?)\b/i);
+  if (nb) return { sizeMm: Number(nb[1]), sizeDisplay: `DN${displayNumber(Number(nb[1]))}` };
   const labeled = text.match(/(?:\bSIZE|CONNECTION SIZE|NOMINAL SIZE)\s*:\s*(\d+(?:\.\d+)?)\s*(MM|INCHES|INCH|IN|\")(?:\b|$)/i);
   const compact = text.match(/\b(\d+(?:\.\d+)?)\s*(MM|INCHES|INCH|IN)\b/i);
   const match = labeled || compact;
@@ -55,13 +59,17 @@ function parseSize(text: string): Pick<MaterialAttributes, "sizeMm" | "sizeDispl
   };
 }
 
+const MAX_PLAUSIBLE_PRESSURE_RATING = 2500;
+
 function parsePressure(text: string): Pick<MaterialAttributes, "pressureBar" | "pressureClass"> {
+  // "PN:" also prefixes OEM part numbers in this data (e.g. "PN:54813982"); a real nominal-pressure
+  // rating never runs that high, so an implausibly large capture is treated as no match at all.
   const pn = text.match(/\bPN\s*[-:]?\s*(\d+(?:\.\d+)?)\b/i);
-  if (pn) return { pressureBar: Number(pn[1]), pressureClass: `PN${displayNumber(Number(pn[1]))}` };
+  if (pn && Number(pn[1]) <= MAX_PLAUSIBLE_PRESSURE_RATING) return { pressureBar: Number(pn[1]), pressureClass: `PN${displayNumber(Number(pn[1]))}` };
   const asme = text.match(/\b(?:CLASS|CL)\s*[-:]?\s*(\d+)\b|\b(\d+)\s*(?:LB|LBS|#)\b/i);
   if (asme) {
-    const rating = asme[1] || asme[2];
-    return { pressureBar: null, pressureClass: `CLASS ${rating}` };
+    const rating = Number(asme[1] || asme[2]);
+    if (rating <= MAX_PLAUSIBLE_PRESSURE_RATING) return { pressureBar: null, pressureClass: `CLASS ${rating}` };
   }
   const bar = text.match(/(?:PRESSURE RATING\s*:\s*(?:MAX\s*)?)?(\d+(?:\.\d+)?)\s*BAR\b/i);
   if (bar) return { pressureBar: Number(bar[1]), pressureClass: `${displayNumber(Number(bar[1]))} BAR` };
@@ -79,8 +87,9 @@ function inferItemType(text: string, className?: string): string | null {
   return known.find((type) => new RegExp(`\\b${type}\\b`).test(text)) || null;
 }
 
-export function parseAttributes(value: string, className = ""): MaterialAttributes {
+export function parseAttributes(value: string, className = "", subtypeTerms: string[] = FALLBACK_SUBTYPES): MaterialAttributes {
   const text = normalizeText(`${className} ${value}`);
+  const orderedSubtypeTerms = [...subtypeTerms].sort((left, right) => right.length - left.length);
   const size = parseSize(text);
   const pressure = parsePressure(text);
   const standards = [...new Set(Array.from(text.matchAll(/\b(?:EN\s*\d+(?:[-.]\d+)*|API\s*\d+(?:[-.]\d+)*|DIN\s*\d+(?:[-.]\d+)*|(?:ANSI|ASME)\s*[A-Z]*\s*\d+(?:\.\d+)*)\b/g), (match) => match[0].replace(/\s+/g, " ")))];
@@ -92,7 +101,7 @@ export function parseAttributes(value: string, className = ""): MaterialAttribut
   const seatMaterial = canonicalMaterial(extractLabeled(text, ["SEAT MATERIAL", "SEAT MOC", "SEAT", "LINER MATERIAL", "SEAL MATERIAL"]));
   return {
     itemType: inferItemType(text, className),
-    subtype: findTerm(text, SUBTYPES) || (containsTerm(text, "BTRFLY") ? "BUTTERFLY" : null),
+    subtype: findTerm(text, orderedSubtypeTerms) || (containsTerm(text, "BTRFLY") ? "BUTTERFLY" : null),
     ...size,
     ...pressure,
     connection: findTerm(text, CONNECTIONS),
@@ -114,4 +123,25 @@ export function isActiveStatus(status: string): boolean {
 
 export function materialSearchText(className: string, shortDescription: string, longDescription: string): string {
   return normalizeText(`${className} ${shortDescription} ${longDescription}`);
+}
+
+// class_name follows a "TYPE, SUBTYPE[, MODIFIER]" comma convention (e.g. "VALVE, BUTTERFLY",
+// "BALL, VALVE", "VALVE, REGULATING, FLUID PRESSURE"). Splitting on commas and discarding the
+// generic/structural segments yields the subtype vocabulary directly from whatever data is at
+// hand, instead of a hand-maintained word list that goes stale as new item types appear.
+const SUBTYPE_VOCABULARY_STOPWORDS = new Set([
+  "VALVE", "VALVES", "MATERIAL", "MATERIALS", "GENERIC", "ASSEMBLY", "ASSEMBLIES", "KIT", "KITS",
+  "REPAIR", "SPARE", "SPARES", "BODY", "SEAT", "ACTUATOR", "POSITIONER", "SKIRT",
+  "AND", "FOR", "TYPE", "N A", "MISC", "MISCELLANEOUS", "OTHER", "OTHERS",
+]);
+
+export function deriveSubtypeVocabulary(classNames: string[]): string[] {
+  const terms = new Set(FALLBACK_SUBTYPES);
+  for (const className of classNames) {
+    for (const part of (className || "").toUpperCase().split(",")) {
+      const term = part.trim();
+      if (term.length >= 3 && term.length <= 24 && /^[A-Z][A-Z /-]*[A-Z]$/.test(term) && !SUBTYPE_VOCABULARY_STOPWORDS.has(term)) terms.add(term);
+    }
+  }
+  return [...terms];
 }

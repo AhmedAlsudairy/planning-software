@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { buildDashboardInsights, percentage } from "@/lib/dashboard";
+import { deriveSubtypeVocabulary } from "@/lib/normalization";
 import type { ClassQualityItem, DashboardAnalytics, DashboardSummary, DistributionItem, MissingPattern, PlantHealthItem, QualityMetric } from "@/types/dashboard";
 import type { MaterialAttributes, MaterialCandidate, MaterialImportRow } from "@/types/material";
 
@@ -91,6 +92,19 @@ export async function ensureSchema(): Promise<void> {
     throw error;
   });
   return schemaPromise;
+}
+
+let subtypeVocabularyCache: { terms: string[]; expiresAt: number } | null = null;
+const SUBTYPE_VOCABULARY_TTL_MS = 5 * 60 * 1000;
+
+export async function getSubtypeVocabulary(): Promise<string[]> {
+  if (subtypeVocabularyCache && subtypeVocabularyCache.expiresAt > Date.now()) return subtypeVocabularyCache.terms;
+  await ensureSchema();
+  const sql = getSql();
+  const rows = await sql`SELECT DISTINCT class_name FROM materials WHERE upload_id = (SELECT current_upload_id FROM material_settings WHERE id = 1) AND status_active = true`;
+  const terms = deriveSubtypeVocabulary(rows.map((row) => String(row.class_name)));
+  subtypeVocabularyCache = { terms, expiresAt: Date.now() + SUBTYPE_VOCABULARY_TTL_MS };
+  return terms;
 }
 
 export class ImportInProgressError extends Error {
@@ -211,6 +225,7 @@ async function runImport(sql: SqlClient, uploadId: string, fileName: string, she
     sql`DELETE FROM material_uploads WHERE id <> ${uploadId}`,
   ]);
   await sql`ANALYZE materials`;
+  subtypeVocabularyCache = null;
   return uploadId;
 }
 
@@ -231,7 +246,7 @@ export async function findCandidates(query: string, attributes: MaterialAttribut
         ts_rank_cd(m.search_vector, plainto_tsquery('simple', $1)) AS lexical_score,
         greatest(similarity(m.search_text, lower($1)), word_similarity(lower($1), m.search_text)) AS fuzzy_score,
         (
-          CASE WHEN $4::text <> '' AND (upper(coalesce(m.attributes->>'subtype', '')) = $4 OR upper(m.class_name) LIKE '%' || $4 || '%') THEN 0.35 ELSE 0 END +
+          CASE WHEN $4::text <> '' AND (upper(coalesce(m.attributes->>'subtype', '')) = $4 OR upper(m.class_name) LIKE '%' || $4 || '%') THEN 0.5 ELSE 0 END +
           CASE WHEN $5::double precision IS NOT NULL AND m.attributes->>'sizeMm' IS NOT NULL AND abs((m.attributes->>'sizeMm')::double precision - $5) <= 1 THEN 0.35 ELSE 0 END +
           CASE WHEN $6::text <> '' AND upper(coalesce(m.attributes->>'connection', '')) = $6 THEN 0.15 ELSE 0 END +
           CASE WHEN $7::text <> '' AND upper(coalesce(m.attributes->>'pressureClass', '')) = $7 THEN 0.15 ELSE 0 END

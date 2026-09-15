@@ -1,6 +1,6 @@
 import ExcelJS from "exceljs";
 import Papa from "papaparse";
-import { isActiveStatus, parseAttributes } from "@/lib/normalization";
+import { deriveSubtypeVocabulary, isActiveStatus, parseAttributes } from "@/lib/normalization";
 import type { MaterialImportRow } from "@/types/material";
 
 const REQUIRED_COLUMNS = ["Corporate No", "SAP No", "Class", "Short Description", "Long Description", "Status"];
@@ -14,7 +14,7 @@ function normalizeRecord(source: Record<string, unknown>): Record<string, string
   return Object.fromEntries(Object.entries(source).map(([key, value]) => [cleanHeader(key), value == null ? "" : String(value).trim()]));
 }
 
-function toMaterial(source: Record<string, unknown>): MaterialImportRow | null {
+function toMaterial(source: Record<string, unknown>, subtypeVocabulary: string[]): MaterialImportRow | null {
   const row = normalizeRecord(source);
   if (!row["Corporate No"] && !row["SAP No"] && !row["Long Description"]) return null;
   const className = row.Class || row["Item Type"] || "";
@@ -33,7 +33,7 @@ function toMaterial(source: Record<string, unknown>): MaterialImportRow | null {
     status: row.Status || "",
     statusDescription: row["Status Description"] || "",
     itemTypeSource: row["Item Type"] || "",
-    attributes: parseAttributes(`${shortDescription} ${longDescription}`, className),
+    attributes: parseAttributes(`${shortDescription} ${longDescription}`, className, subtypeVocabulary),
     statusActive: isActiveStatus(row.Status || ""),
     rawData: row,
   };
@@ -53,15 +53,16 @@ async function parseExcel(buffer: Buffer): Promise<{ rows: MaterialImportRow[]; 
   const headerRow = worksheet.getRow(1);
   const headers = Array.from({ length: worksheet.columnCount }, (_, index) => cleanHeader(headerRow.getCell(index + 1).text));
   validateHeaders(headers);
-  const rows: MaterialImportRow[] = [];
+  const records: Record<string, string>[] = [];
   for (let index = 2; index <= worksheet.rowCount; index += 1) {
     const record: Record<string, string> = {};
     headers.forEach((header, columnIndex) => {
       record[header] = worksheet.getRow(index).getCell(columnIndex + 1).text.trim();
     });
-    const material = toMaterial(record);
-    if (material) rows.push(material);
+    records.push(record);
   }
+  const subtypeVocabulary = deriveSubtypeVocabulary(records.map((record) => record.Class || record["Item Type"] || ""));
+  const rows = records.map((record) => toMaterial(record, subtypeVocabulary)).filter((row): row is MaterialImportRow => Boolean(row));
   return { rows, sheetName: worksheet.name, warnings: workbook.worksheets.length > 1 ? ["Only the first worksheet was imported"] : [] };
 }
 
@@ -75,7 +76,8 @@ function parseCsv(buffer: Buffer): { rows: MaterialImportRow[]; sheetName: strin
   if (errors.length) throw new Error(`CSV parsing failed: ${errors[0].message}`);
   if (result.data.length > MAX_ROWS) throw new Error(`The CSV exceeds the ${MAX_ROWS.toLocaleString()} row limit`);
   validateHeaders(result.meta.fields || []);
-  return { rows: result.data.map(toMaterial).filter((row): row is MaterialImportRow => Boolean(row)), sheetName: "CSV", warnings: [] };
+  const subtypeVocabulary = deriveSubtypeVocabulary(result.data.map((record) => record.Class || record["Item Type"] || ""));
+  return { rows: result.data.map((record) => toMaterial(record, subtypeVocabulary)).filter((row): row is MaterialImportRow => Boolean(row)), sheetName: "CSV", warnings: [] };
 }
 
 export async function parseMaterialFile(fileName: string, buffer: Buffer) {

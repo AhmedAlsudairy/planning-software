@@ -1,4 +1,4 @@
-import { findCandidates } from "@/lib/db";
+import { findCandidates, getSubtypeVocabulary } from "@/lib/db";
 import { embedSearchQuery, extractQueryAttributes, hydrateCandidateEmbeddings } from "@/lib/gemini";
 import { rankCandidates, shortlistCandidates } from "@/lib/matcher";
 import { parseAttributes } from "@/lib/normalization";
@@ -7,7 +7,8 @@ import type { SearchResponse } from "@/types/material";
 export async function runSearch(query: string, limit: number): Promise<SearchResponse> {
   const started = performance.now();
   const warnings: string[] = [];
-  const deterministic = parseAttributes(query);
+  const subtypeVocabulary = await getSubtypeVocabulary();
+  const deterministic = parseAttributes(query, "", subtypeVocabulary);
   let parsedQuery = deterministic;
   if (process.env.GEMINI_API_KEY) {
     try {
@@ -18,7 +19,7 @@ export async function runSearch(query: string, limit: number): Promise<SearchRes
   } else {
     warnings.push("GEMINI_API_KEY is not configured; deterministic extraction and lexical similarity were used.");
   }
-  const candidates = await findCandidates(query, parsedQuery, 60);
+  const candidates = await findCandidates(query, parsedQuery, 120);
   const shortlist = shortlistCandidates(parsedQuery, candidates, Math.max(limit * 2, 8));
   let queryEmbedding: number[] | null = null;
   if (process.env.GEMINI_API_KEY && shortlist.length) {

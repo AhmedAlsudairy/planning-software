@@ -53,6 +53,28 @@ function materialScore(query: MaterialAttributes, candidate: MaterialAttributes)
   return requested.filter((item) => offered.some((value) => value.includes(item) || item.includes(value))).length / requested.length;
 }
 
+function positionMaterialScore(query: string | null, candidate: string | null): number {
+  if (!query || !candidate) return 0;
+  const left = text(query);
+  const right = text(candidate);
+  return left === right || left.includes(right) || right.includes(left) ? 1 : 0;
+}
+
+const SUBTYPE_SYNONYMS: Record<string, string> = { "NON RETURN": "CHECK" };
+
+function canonicalSubtype(value: string | null): string | null {
+  if (!value) return null;
+  const upper = text(value);
+  return SUBTYPE_SYNONYMS[upper] || upper;
+}
+
+function subtypeCompatible(query: string | null, candidate: string | null): boolean {
+  const left = canonicalSubtype(query);
+  const right = canonicalSubtype(candidate);
+  if (!left || !right) return true;
+  return left === right || left.includes(right) || right.includes(left);
+}
+
 function standardScore(query: string[], candidate: string[]): number {
   if (!query.length || !candidate.length) return 0;
   return query.filter((standard) => candidate.some((value) => text(value) === text(standard))).length / query.length;
@@ -77,6 +99,7 @@ function isWrongFamily(query: MaterialAttributes, candidate: MaterialCandidate):
   const className = text(candidate.className);
   if (!className.includes(text(query.itemType))) return true;
   if (query.itemType === "VALVE" && !query.subtype && /KIT|SEAT|ACTUATOR|POSITIONER|SPARE/.test(className)) return true;
+  if (!subtypeCompatible(query.subtype, candidate.attributes.subtype)) return true;
   return false;
 }
 
@@ -85,10 +108,15 @@ function scoreAttributes(query: MaterialAttributes, candidate: MaterialAttribute
   const materials = materialScore(query, candidate);
   const standards = standardScore(query.standards, candidate.standards);
   const entries: ScoredAttribute[] = [
+    { key: "subtype", label: "Type", query: query.subtype, candidate: candidate.subtype, weight: 24, score: subtypeCompatible(query.subtype, candidate.subtype) ? 1 : 0, state: "missing" },
     { key: "size", label: "Size / DN", query: query.sizeDisplay || (query.sizeMm == null ? null : `${query.sizeMm}MM`), candidate: candidate.sizeDisplay || (candidate.sizeMm == null ? null : `${candidate.sizeMm}MM`), weight: 25, score: numericScore(query.sizeMm, candidate.sizeMm, 1), state: "missing" },
     { key: "connection", label: "Connection", query: query.connection, candidate: candidate.connection, weight: 20, score: textScore(query.connection, candidate.connection), state: "missing" },
     { key: "pressure", label: "Pressure", query: query.pressureClass || (query.pressureBar == null ? null : `${query.pressureBar} BAR`), candidate: candidate.pressureClass || (candidate.pressureBar == null ? null : `${candidate.pressureBar} BAR`), weight: 15, score: pressure, state: "missing" },
-    { key: "materials", label: "Materials", query: query.materials.join(", ") || null, candidate: candidate.materials.join(", ") || null, weight: 15, score: materials, state: "missing" },
+    { key: "materials", label: "Materials", query: query.materials.join(", ") || null, candidate: candidate.materials.join(", ") || null, weight: 12, score: materials, state: "missing" },
+    { key: "bodyMaterial", label: "Body material", query: query.bodyMaterial, candidate: candidate.bodyMaterial, weight: 6, score: positionMaterialScore(query.bodyMaterial, candidate.bodyMaterial), state: "missing" },
+    { key: "discMaterial", label: "Disc/ball material", query: query.discMaterial, candidate: candidate.discMaterial, weight: 6, score: positionMaterialScore(query.discMaterial, candidate.discMaterial), state: "missing" },
+    { key: "stemMaterial", label: "Stem material", query: query.stemMaterial, candidate: candidate.stemMaterial, weight: 4, score: positionMaterialScore(query.stemMaterial, candidate.stemMaterial), state: "missing" },
+    { key: "seatMaterial", label: "Seat material", query: query.seatMaterial, candidate: candidate.seatMaterial, weight: 6, score: positionMaterialScore(query.seatMaterial, candidate.seatMaterial), state: "missing" },
     { key: "faceToFace", label: "Face-to-face", query: query.faceToFaceMm == null ? null : `${query.faceToFaceMm}MM`, candidate: candidate.faceToFaceMm == null ? null : `${candidate.faceToFaceMm}MM`, weight: 8, score: numericScore(query.faceToFaceMm, candidate.faceToFaceMm, 1), state: "missing" },
     { key: "standards", label: "Standards", query: query.standards.join(", ") || null, candidate: candidate.standards.join(", ") || null, weight: 7, score: standards, state: "missing" },
     { key: "actuation", label: "Actuation", query: query.actuation, candidate: candidate.actuation, weight: 10, score: textScore(query.actuation, candidate.actuation), state: "missing" },
