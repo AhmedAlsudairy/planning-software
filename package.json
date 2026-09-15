@@ -10,7 +10,8 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "verify": "npm run lint && npm run typecheck && npm run test && npm run build"
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "backfill-embeddings": "node --env-file=.env.local scripts/backfill-embeddings.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.22.0",

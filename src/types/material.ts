@@ -80,6 +80,10 @@ export interface SearchResponse {
   elapsedMs: number;
 }
 
+export interface BatchSearchResponse {
+  results: SearchResponse[];
+}
+
 export interface UploadSummary {
   uploadId: string;
   fileName: string;

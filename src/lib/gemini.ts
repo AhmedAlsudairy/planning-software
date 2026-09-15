@@ -47,7 +47,7 @@ const extractedAttributesSchema = z.object({
 function client(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not configured");
-  return new GoogleGenAI({ apiKey });
+  return new GoogleGenAI({ apiKey, httpOptions: { timeout: 8_000, retryOptions: { attempts: 1 } } });
 }
 
 function clean(value: string | null): string | null {
@@ -60,7 +60,7 @@ export async function extractQueryAttributes(query: string, deterministic: Mater
     input: `Extract only engineering attributes explicitly present in this material specification. Convert inch sizes to millimetres. Do not infer missing values or claim pressure-class equivalence. Specification: ${query}`,
     response_format: { type: "text", mime_type: "application/json", schema: extractionSchema },
     store: false,
-  });
+  }, { timeout: 8_000, maxRetries: 0 });
   if (!("output_text" in response) || !response.output_text) return deterministic;
   const extracted = extractedAttributesSchema.parse(JSON.parse(response.output_text));
   return {
@@ -86,7 +86,7 @@ async function embed(text: string): Promise<number[]> {
   const response = await client().models.embedContent({
     model: process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-2",
     contents: text,
-    config: { outputDimensionality: 768 },
+    config: { outputDimensionality: 768, httpOptions: { timeout: 8_000, retryOptions: { attempts: 1 } } },
   });
   const values = response.embeddings?.[0]?.values;
   if (!values?.length) throw new Error("Gemini returned an empty embedding");

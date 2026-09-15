@@ -82,6 +82,7 @@ function MatchCard({ match }: { match: MaterialMatch }) {
 
 export default function MaterialMatcher() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const bulkSearchInputRef = useRef<HTMLInputElement>(null);
   const [stats, setStats] = useState<Stats>({ configured: false, materials: 0, active: 0, lastUpload: null });
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -89,7 +90,8 @@ export default function MaterialMatcher() {
   const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
-  const [results, setResults] = useState<SearchResponse | null>(null);
+  const [bulkSearching, setBulkSearching] = useState(false);
+  const [results, setResults] = useState<SearchResponse[] | null>(null);
   const [error, setError] = useState("");
 
   const loadStats = async () => {
@@ -138,15 +140,21 @@ export default function MaterialMatcher() {
   };
 
   const search = async () => {
-    if (query.trim().length < 3) return setError("Enter a material specification");
+    const items = [...new Set(query.split("\n").map((line) => line.trim()).filter((line) => line.length >= 3))];
+    if (!items.length) return setError("Enter a material specification (one per line for multiple searches)");
     setSearching(true);
     setError("");
     setResults(null);
     try {
-      const response = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, limit: 5 }) });
+      const single = items.length === 1;
+      const response = await fetch(single ? "/api/search" : "/api/search/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(single ? { query: items[0], limit: 5 } : { items, limit: 5 }),
+      });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Search failed");
-      setResults(data);
+      setResults(single ? [data] : data.results);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Search failed");
     } finally {
@@ -154,9 +162,32 @@ export default function MaterialMatcher() {
     }
   };
 
+  const bulkSearchFromFile = async (selected?: File) => {
+    if (!selected) return;
+    if (!/\.(xlsx|csv)$/i.test(selected.name)) return setError("Choose an .xlsx or .csv file");
+    setBulkSearching(true);
+    setError("");
+    setResults(null);
+    const body = new FormData();
+    body.append("file", selected);
+    body.append("limit", "5");
+    try {
+      const response = await fetch("/api/search/batch-upload", { method: "POST", body });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Bulk search failed");
+      setResults(data.results);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Bulk search failed");
+    } finally {
+      setBulkSearching(false);
+      if (bulkSearchInputRef.current) bulkSearchInputRef.current.value = "";
+    }
+  };
+
   const exportResults = async () => {
-    if (!results) return;
-    const response = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: results.query, matches: results.matches }) });
+    if (!results?.length) return;
+    const payload = results.length === 1 ? { query: results[0].query, matches: results[0].matches } : { results: results.map((result) => ({ query: result.query, matches: result.matches })) };
+    const response = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     if (!response.ok) return setError("Export failed");
     const url = URL.createObjectURL(await response.blob());
     const anchor = document.createElement("a");
@@ -194,9 +225,13 @@ export default function MaterialMatcher() {
 
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-900/5">
             <div className="mb-4 flex items-center justify-between"><div><span className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-700">Step 02</span><h2 className="mt-1 text-xl font-bold">Target specification</h2></div><Search className="text-slate-300" /></div>
-            <textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe item type, size, pressure, connection, materials and standards…" className="h-36 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:bg-white focus:ring-4 focus:ring-emerald-600/10" />
+            <textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe item type, size, pressure, connection, materials and standards… (one specification per line to search several at once)" className="h-36 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:bg-white focus:ring-4 focus:ring-emerald-600/10" />
             <div className="mt-3 flex items-center justify-between gap-4"><button onClick={() => setQuery(EXAMPLE)} className="text-left text-xs font-semibold text-emerald-700 hover:text-emerald-900">Use butterfly valve example</button><span className="text-xs text-slate-400">{query.length}/2,000</span></div>
-            <button onClick={search} disabled={searching || query.trim().length < 3 || !stats.materials} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{searching ? <LoaderCircle className="animate-spin" size={18} /> : <Sparkles size={18} />}{searching ? "Parsing and ranking candidates…" : "Find matching materials"}<ArrowRight size={17} /></button>
+            <button onClick={search} disabled={searching || bulkSearching || query.trim().length < 3 || !stats.materials} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{searching ? <LoaderCircle className="animate-spin" size={18} /> : <Sparkles size={18} />}{searching ? "Parsing and ranking candidates…" : "Find matching materials"}<ArrowRight size={17} /></button>
+            <div className="mt-4 flex items-center gap-3 border-t border-slate-100 pt-4">
+              <input ref={bulkSearchInputRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={(event) => bulkSearchFromFile(event.target.files?.[0])} />
+              <button onClick={() => bulkSearchInputRef.current?.click()} disabled={searching || bulkSearching || !stats.materials} className="flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 transition hover:border-emerald-400 hover:text-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{bulkSearching ? <LoaderCircle className="animate-spin" size={15} /> : <FileSpreadsheet size={15} />}{bulkSearching ? "Searching bulk list…" : "Or search a list from Excel/CSV (up to 200 items)"}</button>
+            </div>
           </div>
         </section>
 
@@ -205,10 +240,25 @@ export default function MaterialMatcher() {
 
         {results && <section className="space-y-5">
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start"><div><div className="flex items-center gap-2"><h2 className="text-2xl font-bold tracking-tight">Top material matches</h2><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-500">{results.matches.length}</span></div><p className="mt-2 max-w-4xl text-sm leading-6 text-slate-500">{results.query}</p><div className="mt-4"><AttributePills attributes={results.parsedQuery} /></div><p className="mt-3 text-xs text-slate-400">{results.semanticMode === "gemini" ? "Gemini semantic ranking" : "Lexical fallback"} · {results.elapsedMs.toLocaleString()} ms</p></div><div className="flex shrink-0 gap-2 print:hidden"><button onClick={() => window.print()} className="flex h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 text-sm font-bold hover:bg-slate-50"><Printer size={16} />PDF</button><button onClick={exportResults} className="flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-3 text-sm font-bold text-white hover:bg-slate-800"><Download size={16} />Excel</button></div></div>
-            {results.warnings.map((warning) => <div key={warning} className="mt-3 flex items-center gap-2 text-xs text-amber-700"><TriangleAlert size={14} />{warning}</div>)}
+            <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+              <div className="flex items-center gap-2"><h2 className="text-2xl font-bold tracking-tight">{results.length > 1 ? `Results for ${results.length} specifications` : "Top material matches"}</h2><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold text-slate-500">{results.reduce((sum, result) => sum + result.matches.length, 0)} matches</span></div>
+              <div className="flex shrink-0 gap-2 print:hidden"><button onClick={() => window.print()} className="flex h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 text-sm font-bold hover:bg-slate-50"><Printer size={16} />PDF</button><button onClick={exportResults} className="flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-3 text-sm font-bold text-white hover:bg-slate-800"><Download size={16} />Excel</button></div>
+            </div>
           </div>
-          {results.matches.length ? <div className="space-y-4">{results.matches.map((match) => <MatchCard key={match.id} match={match} />)}</div> : <div className="rounded-2xl border border-slate-200 bg-white p-12 text-center"><AlertCircle className="mx-auto text-slate-300" size={36} /><h3 className="mt-4 font-bold">No eligible matches found</h3><p className="mt-1 text-sm text-slate-500">Try a broader item description or upload additional material records.</p></div>}
+          {results.map((result, index) => (
+            <div key={index} className="space-y-4">
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex items-start gap-3">
+                  {results.length > 1 && <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-900 text-[11px] font-bold text-white">{index + 1}</span>}
+                  <p className="max-w-4xl text-sm font-semibold leading-6 text-slate-700">{result.query}</p>
+                </div>
+                <div className="mt-3"><AttributePills attributes={result.parsedQuery} /></div>
+                <p className="mt-3 text-xs text-slate-400">{result.semanticMode === "gemini" ? "Gemini semantic ranking" : "Lexical fallback"} · {result.elapsedMs.toLocaleString()} ms</p>
+                {result.warnings.map((warning) => <div key={warning} className="mt-2 flex items-center gap-2 text-xs text-amber-700"><TriangleAlert size={14} />{warning}</div>)}
+              </div>
+              {result.matches.length ? <div className="space-y-4">{result.matches.map((match) => <MatchCard key={match.id} match={match} />)}</div> : <div className="rounded-2xl border border-slate-200 bg-white p-12 text-center"><AlertCircle className="mx-auto text-slate-300" size={36} /><h3 className="mt-4 font-bold">No eligible matches found</h3><p className="mt-1 text-sm text-slate-500">Try a broader item description or upload additional material records.</p></div>}
+            </div>
+          ))}
         </section>}
       </div>
     </main>

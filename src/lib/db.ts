@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { buildDashboardInsights, percentage } from "@/lib/dashboard";
-import type { DashboardAnalytics, DashboardSummary, DistributionItem, QualityMetric } from "@/types/dashboard";
+import type { ClassQualityItem, DashboardAnalytics, DashboardSummary, DistributionItem, MissingPattern, PlantHealthItem, QualityMetric } from "@/types/dashboard";
 import type { MaterialAttributes, MaterialCandidate, MaterialImportRow } from "@/types/material";
 
 let schemaPromise: Promise<void> | null = null;
@@ -69,14 +69,22 @@ export async function ensureSchema(): Promise<void> {
         search_vector tsvector GENERATED ALWAYS AS (
           to_tsvector('simple'::regconfig, class_name || ' ' || short_description || ' ' || long_description)
         ) STORED,
+        status_rank smallint GENERATED ALWAYS AS (
+          CASE WHEN status = 'B2-ERP ACCEPTED' THEN 0 WHEN status LIKE 'C2-RFC%' THEN 1 ELSE 2 END
+        ) STORED,
         UNIQUE (upload_id, corporate_no, sap_no, plant)
       )
     `;
     await sql`ALTER TABLE materials DROP CONSTRAINT IF EXISTS materials_corporate_no_sap_no_plant_key`;
+    await sql`ALTER TABLE materials ADD COLUMN IF NOT EXISTS status_rank smallint GENERATED ALWAYS AS (
+      CASE WHEN status = 'B2-ERP ACCEPTED' THEN 0 WHEN status LIKE 'C2-RFC%' THEN 1 ELSE 2 END
+    ) STORED`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS materials_upload_identity_idx ON materials(upload_id, corporate_no, sap_no, plant)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_search_vector_idx ON materials USING gin(search_vector)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_search_trgm_idx ON materials USING gin(search_text gin_trgm_ops)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_filter_idx ON materials(status_active, class_name)`;
+    await sql`CREATE INDEX IF NOT EXISTS materials_class_trgm_idx ON materials USING gin(lower(class_name) gin_trgm_ops)`;
+    await sql`CREATE INDEX IF NOT EXISTS materials_dedup_idx ON materials(upload_id, status_active, corporate_no, sap_no, status_rank, updated_at DESC)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_embedding_idx ON materials USING hnsw(embedding vector_cosine_ops)`;
   })().catch((error) => {
     schemaPromise = null;
@@ -202,6 +210,7 @@ async function runImport(sql: SqlClient, uploadId: string, fileName: string, she
     sql`DELETE FROM materials WHERE upload_id <> ${uploadId}`,
     sql`DELETE FROM material_uploads WHERE id <> ${uploadId}`,
   ]);
+  await sql`ANALYZE materials`;
   return uploadId;
 }
 
@@ -229,11 +238,7 @@ export async function findCandidates(query: string, attributes: MaterialAttribut
         ) AS engineering_score,
         row_number() OVER (
           PARTITION BY m.corporate_no, m.sap_no
-          ORDER BY CASE
-            WHEN m.status = 'B2-ERP ACCEPTED' THEN 0
-            WHEN m.status LIKE 'C2-RFC%' THEN 1
-            ELSE 2
-          END, m.updated_at DESC
+          ORDER BY m.status_rank, m.updated_at DESC
         ) AS material_rank
       FROM materials m
       WHERE m.upload_id = (SELECT current_upload_id FROM material_settings WHERE id = 1)
@@ -321,7 +326,7 @@ export async function getDashboardAnalytics(): Promise<DashboardAnalytics> {
   await ensureSchema();
   const sql = getSql();
   const currentUpload = `(SELECT current_upload_id FROM material_settings WHERE id = 1)`;
-  const [summaryRows, uploadRows, statusRows, classRows, plantRows, materialTypeRows, qualityRows, readinessRows] = await Promise.all([
+  const [summaryRows, uploadRows, statusRows, classRows, plantRows, materialTypeRows, qualityRows, readinessRows, duplicateRows, descriptionRows, yearRows, missingRows] = await Promise.all([
     sql.query(`SELECT
       count(*)::int AS total,
       count(*) FILTER (WHERE status_active)::int AS active,
@@ -329,12 +334,29 @@ export async function getDashboardAnalytics(): Promise<DashboardAnalytics> {
       count(DISTINCT nullif(plant, ''))::int AS plants,
       count(DISTINCT nullif(class_name, ''))::int AS classes,
       count(*) FILTER (WHERE status_active AND embedding IS NOT NULL)::int AS embedded,
+      count(*) FILTER (WHERE sap_no ~ '^[0-9]+$')::int AS numeric_sap,
+      count(*) FILTER (WHERE upper(sap_no) LIKE 'NIR-%')::int AS provisional_sap,
+      count(*) FILTER (WHERE nullif(sap_no, '') IS NULL)::int AS missing_sap,
+      count(*) FILTER (WHERE upper(trim(class_name)) IN ('', 'MATERIAL', 'GENERIC'))::int AS generic_class,
+      count(*) FILTER (WHERE raw_data->>'Created Date' ~ '^[0-9]{2}-[0-9]{2}-[0-9]{4}$')::int AS dated,
+      coalesce(avg(length(long_description)) FILTER (WHERE status_active), 0)::double precision AS average_description_length,
       coalesce(avg((${readinessExpression})) FILTER (WHERE status_active), 0)::double precision AS readiness
       FROM materials WHERE upload_id = ${currentUpload}`),
     sql.query(`SELECT u.file_name, u.sheet_name, u.row_count, u.active_count, u.created_at FROM material_uploads u JOIN material_settings s ON s.current_upload_id = u.id WHERE s.id = 1`),
     sql.query(`SELECT coalesce(nullif(status, ''), 'UNSPECIFIED') AS label, count(*)::int AS count, count(*) FILTER (WHERE status_active)::int AS active, count(*) FILTER (WHERE NOT status_active)::int AS inactive FROM materials WHERE upload_id = ${currentUpload} GROUP BY status ORDER BY count DESC`),
-    sql.query(`SELECT coalesce(nullif(class_name, ''), 'UNSPECIFIED') AS label, count(*)::int AS count, count(*) FILTER (WHERE status_active)::int AS active, count(*) FILTER (WHERE NOT status_active)::int AS inactive, coalesce(avg((${readinessExpression})) FILTER (WHERE status_active), 0)::double precision AS readiness FROM materials WHERE upload_id = ${currentUpload} GROUP BY class_name ORDER BY count DESC LIMIT 12`),
-    sql.query(`SELECT coalesce(nullif(plant, ''), 'UNSPECIFIED') AS label, count(*)::int AS count, count(*) FILTER (WHERE status_active)::int AS active, count(*) FILTER (WHERE NOT status_active)::int AS inactive FROM materials WHERE upload_id = ${currentUpload} GROUP BY plant ORDER BY count DESC LIMIT 12`),
+    sql.query(`SELECT coalesce(nullif(class_name, ''), 'UNSPECIFIED') AS label, count(*)::int AS count,
+      count(*) FILTER (WHERE status_active)::int AS active, count(*) FILTER (WHERE NOT status_active)::int AS inactive,
+      coalesce(avg((${readinessExpression})) FILTER (WHERE status_active), 0)::double precision AS readiness,
+      count(*) FILTER (WHERE status_active AND nullif(attributes->>'sizeMm', '') IS NOT NULL)::int AS size_count,
+      count(*) FILTER (WHERE status_active AND (nullif(attributes->>'pressureClass', '') IS NOT NULL OR nullif(attributes->>'pressureBar', '') IS NOT NULL))::int AS pressure_count,
+      count(*) FILTER (WHERE status_active AND nullif(attributes->>'connection', '') IS NOT NULL)::int AS connection_count,
+      count(*) FILTER (WHERE status_active AND jsonb_array_length(coalesce(attributes->'materials', '[]'::jsonb)) > 0)::int AS material_count,
+      count(*) FILTER (WHERE status_active AND jsonb_array_length(coalesce(attributes->'standards', '[]'::jsonb)) > 0)::int AS standard_count
+      FROM materials WHERE upload_id = ${currentUpload} GROUP BY class_name ORDER BY count DESC LIMIT 15`),
+    sql.query(`SELECT coalesce(nullif(plant, ''), 'UNSPECIFIED') AS label, count(*)::int AS count,
+      count(*) FILTER (WHERE status_active)::int AS active, count(*) FILTER (WHERE NOT status_active)::int AS inactive,
+      coalesce(avg((${readinessExpression})) FILTER (WHERE status_active), 0)::double precision AS readiness
+      FROM materials WHERE upload_id = ${currentUpload} GROUP BY plant ORDER BY count DESC LIMIT 20`),
     sql.query(`SELECT coalesce(nullif(material_type, ''), 'UNSPECIFIED') AS label, count(*)::int AS count FROM materials WHERE upload_id = ${currentUpload} GROUP BY material_type ORDER BY count DESC LIMIT 10`),
     sql.query(`SELECT
       count(*) FILTER (WHERE nullif(long_description, '') IS NOT NULL)::int AS description,
@@ -349,12 +371,26 @@ export async function getDashboardAnalytics(): Promise<DashboardAnalytics> {
       count(*) FILTER (WHERE nullif(attributes->>'actuation', '') IS NOT NULL)::int AS actuation
       FROM materials WHERE upload_id = ${currentUpload} AND status_active`),
     sql.query(`WITH readiness AS (SELECT (${readinessExpression}) AS score FROM materials WHERE upload_id = ${currentUpload} AND status_active) SELECT CASE WHEN score >= 70 THEN 'Strong' WHEN score >= 40 THEN 'Partial' ELSE 'Sparse' END AS label, count(*)::int AS count FROM readiness GROUP BY 1 ORDER BY min(score) DESC`),
+    sql.query(`WITH duplicate_groups AS (SELECT lower(trim(long_description)) AS description, count(*)::int AS rows FROM materials WHERE upload_id = ${currentUpload} AND status_active AND length(trim(long_description)) >= 10 GROUP BY 1 HAVING count(*) > 1) SELECT count(*)::int AS groups, coalesce(sum(rows - 1), 0)::int AS duplicate_rows FROM duplicate_groups`),
+    sql.query(`SELECT CASE WHEN length(long_description) < 40 THEN 'Under 40 chars' WHEN length(long_description) < 100 THEN '40-99 chars' WHEN length(long_description) < 200 THEN '100-199 chars' ELSE '200+ chars' END AS label, count(*)::int AS count FROM materials WHERE upload_id = ${currentUpload} AND status_active GROUP BY 1 ORDER BY min(length(long_description))`),
+    sql.query(`SELECT right(raw_data->>'Created Date', 4) AS label, count(*)::int AS count FROM materials WHERE upload_id = ${currentUpload} AND raw_data->>'Created Date' ~ '^[0-9]{2}-[0-9]{2}-[0-9]{4}$' GROUP BY 1 ORDER BY label`),
+    sql.query(`WITH gaps AS (SELECT concat_ws(', ',
+      CASE WHEN nullif(attributes->>'sizeMm', '') IS NULL THEN 'Size' END,
+      CASE WHEN nullif(attributes->>'pressureClass', '') IS NULL AND nullif(attributes->>'pressureBar', '') IS NULL THEN 'Pressure' END,
+      CASE WHEN nullif(attributes->>'connection', '') IS NULL THEN 'Connection' END,
+      CASE WHEN jsonb_array_length(coalesce(attributes->'materials', '[]'::jsonb)) = 0 THEN 'Materials' END,
+      CASE WHEN jsonb_array_length(coalesce(attributes->'standards', '[]'::jsonb)) = 0 THEN 'Standards' END
+    ) AS label FROM materials WHERE upload_id = ${currentUpload} AND status_active) SELECT CASE WHEN label = '' THEN 'No critical gaps' ELSE label END AS label, count(*)::int AS count FROM gaps GROUP BY label ORDER BY count DESC LIMIT 8`),
   ]);
   const source = summaryRows[0] || {};
   const total = Number(source.total || 0);
   const searchable = Number(source.active || 0);
   const unique = Number(source.unique_materials || 0);
   const embedded = Number(source.embedded || 0);
+  const numericSap = Number(source.numeric_sap || 0);
+  const provisionalSap = Number(source.provisional_sap || 0);
+  const missingSap = Number(source.missing_sap || 0);
+  const descriptionDuplicates = duplicateRows[0] || {};
   const summary: DashboardSummary = {
     totalRecords: total,
     searchableRecords: searchable,
@@ -367,6 +403,15 @@ export async function getDashboardAnalytics(): Promise<DashboardAnalytics> {
     embeddedRecords: embedded,
     embeddingCoverage: percentage(embedded, searchable),
     matchReadiness: Math.round(Number(source.readiness || 0) * 10) / 10,
+    numericSapRecords: numericSap,
+    provisionalSapRecords: provisionalSap,
+    missingSapRecords: missingSap,
+    otherSapRecords: Math.max(0, total - numericSap - provisionalSap - missingSap),
+    genericClassRecords: Number(source.generic_class || 0),
+    duplicateDescriptionGroups: Number(descriptionDuplicates.groups || 0),
+    duplicateDescriptionRows: Number(descriptionDuplicates.duplicate_rows || 0),
+    averageDescriptionLength: Math.round(Number(source.average_description_length || 0)),
+    datedRecords: Number(source.dated || 0),
   };
   const qualitySource = qualityRows[0] || {};
   const qualityDefinitions: Array<[string, string, boolean]> = [
@@ -377,9 +422,25 @@ export async function getDashboardAnalytics(): Promise<DashboardAnalytics> {
   ];
   const qualityMetrics: QualityMetric[] = qualityDefinitions.map(([key, label, critical]) => ({ key, label, critical, count: Number(qualitySource[key] || 0), percentage: percentage(Number(qualitySource[key] || 0), searchable) }));
   const classDistribution = distribution(classRows, total);
+  const classQuality: ClassQualityItem[] = classRows.map((row) => {
+    const active = Number(row.active || 0);
+    return { label: String(row.label), count: Number(row.count), active, readiness: Math.round(Number(row.readiness || 0) * 10) / 10, sizeCoverage: percentage(Number(row.size_count || 0), active), pressureCoverage: percentage(Number(row.pressure_count || 0), active), connectionCoverage: percentage(Number(row.connection_count || 0), active), materialCoverage: percentage(Number(row.material_count || 0), active), standardCoverage: percentage(Number(row.standard_count || 0), active) };
+  });
+  const plantHealth: PlantHealthItem[] = plantRows.map((row) => {
+    const count = Number(row.count || 0);
+    const active = Number(row.active || 0);
+    return { label: String(row.label), count, searchable: active, excluded: Number(row.inactive || 0), searchableRate: percentage(active, count), readiness: Math.round(Number(row.readiness || 0) * 10) / 10 };
+  });
   const upload = uploadRows[0] ? {
     fileName: String(uploadRows[0].file_name), sheetName: String(uploadRows[0].sheet_name), rowCount: Number(uploadRows[0].row_count), activeCount: Number(uploadRows[0].active_count), createdAt: new Date(String(uploadRows[0].created_at)).toISOString(),
   } : null;
+  const sapMaturityDistribution: DistributionItem[] = [
+    { label: "ERP numeric code", count: numericSap, percentage: percentage(numericSap, total) },
+    { label: "Provisional NIR", count: provisionalSap, percentage: percentage(provisionalSap, total) },
+    { label: "Other format", count: summary.otherSapRecords, percentage: percentage(summary.otherSapRecords, total) },
+    { label: "Missing", count: missingSap, percentage: percentage(missingSap, total) },
+  ].filter((item) => item.count > 0);
+  const missingPatterns: MissingPattern[] = missingRows.map((row) => ({ label: String(row.label), count: Number(row.count || 0), percentage: percentage(Number(row.count || 0), searchable) }));
   return {
     generatedAt: new Date().toISOString(), upload, summary,
     statusDistribution: distribution(statusRows, total),
@@ -388,6 +449,12 @@ export async function getDashboardAnalytics(): Promise<DashboardAnalytics> {
     materialTypeDistribution: distribution(materialTypeRows, total),
     qualityMetrics,
     readinessDistribution: distribution(readinessRows, searchable),
+    sapMaturityDistribution,
+    descriptionLengthDistribution: distribution(descriptionRows, searchable),
+    createdYearDistribution: distribution(yearRows, summary.datedRecords),
+    classQuality,
+    plantHealth,
+    missingPatterns,
     insights: buildDashboardInsights(summary, qualityMetrics, classDistribution),
   };
 }
