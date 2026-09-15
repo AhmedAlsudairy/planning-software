@@ -42,9 +42,34 @@ export function buildDashboardInsights(summary: DashboardSummary, quality: Quali
       value: summary.duplicateRows.toLocaleString("en-IN"),
     });
   }
+  if (summary.duplicateDescriptionRows) {
+    insights.push({
+      severity: "warning",
+      title: "Repeated descriptions need review",
+      description: "Multiple searchable records share the exact same normalized long description, which can indicate duplicate codes or legitimate plant variants.",
+      value: summary.duplicateDescriptionRows.toLocaleString("en-IN"),
+    });
+  }
+  const provisionalRate = percentage(summary.provisionalSapRecords, summary.totalRecords);
+  if (summary.provisionalSapRecords) {
+    insights.push({
+      severity: provisionalRate >= 15 ? "warning" : "info",
+      title: "Provisional SAP codes remain",
+      description: "NIR identifiers represent records that may not yet have a final numeric ERP material code.",
+      value: `${provisionalRate}%`,
+    });
+  }
+  if (summary.matchReadiness < 60) {
+    insights.push({
+      severity: summary.matchReadiness < 40 ? "critical" : "warning",
+      title: "Overall match readiness is limited",
+      description: "Prioritize critical attribute enrichment by class before treating confidence scores as automation decisions.",
+      value: `${summary.matchReadiness}%`,
+    });
+  }
   const topClass = classes[0];
   if (topClass) {
     insights.push({ severity: "positive", title: `${topClass.label} is the largest class`, description: "Prioritize a class-specific parser and evaluation set here for the highest immediate accuracy impact.", value: `${topClass.percentage}%` });
   }
-  return insights.slice(0, 5);
+  return insights.slice(0, 8);
 }

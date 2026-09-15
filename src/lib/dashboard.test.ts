@@ -14,6 +14,15 @@ const summary: DashboardSummary = {
   embeddedRecords: 100,
   embeddingCoverage: 0.6,
   matchReadiness: 52,
+  numericSapRecords: 15_000,
+  provisionalSapRecords: 4_000,
+  otherSapRecords: 1_000,
+  missingSapRecords: 0,
+  genericClassRecords: 100,
+  duplicateDescriptionGroups: 250,
+  duplicateDescriptionRows: 400,
+  averageDescriptionLength: 120,
+  datedRecords: 19_000,
 };
 
 const quality: QualityMetric[] = [
@@ -34,6 +43,9 @@ describe("dashboard analysis", () => {
       "Inactive records are intentionally excluded",
       "Size / DN needs enrichment",
       "Plant-level duplicates detected",
+      "Repeated descriptions need review",
+      "Provisional SAP codes remain",
+      "Overall match readiness is limited",
     ]));
   });
 });

@@ -42,6 +42,8 @@ Open `/dashboard` to analyze the active material master. Dashboard calculations 
 
 The readiness score measures description, item type, subtype, size, pressure, connection, materials, standards, and actuation coverage. It is a data-completeness indicator, not a probability that a material is correct.
 
+Advanced analysis includes SAP-code maturity, exact normalized-description repetition, description-length distribution, creation-year volume, common engineering-gap combinations, class-level attribute coverage, and plant-level eligibility/readiness. Dashboard methodology explains every derived metric and warns when mixed-class statistics should not be interpreted as universal requirements.
+
 ## Upload replacement behavior
 
 Each successful upload becomes the single active dataset:
