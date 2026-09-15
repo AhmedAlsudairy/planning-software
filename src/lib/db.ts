@@ -236,16 +236,31 @@ function parseEmbedding(value: unknown): number[] | null {
   return null;
 }
 
+// A SAP code or corporate number never resembles an engineering description, so lexical/trigram
+// text scoring against class_name+description never finds it. Detect that shape and look it up
+// directly instead of only scoring free text.
+function extractCodeToken(query: string): string {
+  const trimmed = query.trim().toUpperCase().replace(/\s+/g, "");
+  if (/^\d{4,}$/.test(trimmed)) return trimmed;
+  if (/^[A-Z]\d{6,}$/.test(trimmed)) return trimmed;
+  if (/^NIR-/.test(trimmed)) return trimmed;
+  return "";
+}
+
 export async function findCandidates(query: string, attributes: MaterialAttributes, limit = 24): Promise<MaterialCandidate[]> {
   await ensureSchema();
   const sql = getSql();
   const classFilter = attributes.itemType ? `%${attributes.itemType.toLowerCase()}%` : "%";
+  const codeToken = extractCodeToken(query);
   const rows = await sql.query(
     `WITH scored AS (
       SELECT m.*,
-        ts_rank_cd(m.search_vector, plainto_tsquery('simple', $1)) AS lexical_score,
-        greatest(similarity(m.search_text, lower($1)), word_similarity(lower($1), m.search_text)) AS fuzzy_score,
+        (CASE WHEN $8::text <> '' AND (m.sap_no LIKE '%' || $8 || '%' OR upper(m.corporate_no) LIKE '%' || $8 || '%') THEN 1
+              ELSE ts_rank_cd(m.search_vector, plainto_tsquery('simple', $1)) END) AS lexical_score,
+        (CASE WHEN $8::text <> '' AND (m.sap_no LIKE '%' || $8 || '%' OR upper(m.corporate_no) LIKE '%' || $8 || '%') THEN 1
+              ELSE greatest(similarity(m.search_text, lower($1)), word_similarity(lower($1), m.search_text)) END) AS fuzzy_score,
         (
+          CASE WHEN $8::text <> '' AND (m.sap_no LIKE '%' || $8 || '%' OR upper(m.corporate_no) LIKE '%' || $8 || '%') THEN 3 ELSE 0 END +
           CASE WHEN $4::text <> '' AND (upper(coalesce(m.attributes->>'subtype', '')) = $4 OR upper(m.class_name) LIKE '%' || $4 || '%') THEN 0.5 ELSE 0 END +
           CASE WHEN $5::double precision IS NOT NULL AND m.attributes->>'sizeMm' IS NOT NULL AND abs((m.attributes->>'sizeMm')::double precision - $5) <= 1 THEN 0.35 ELSE 0 END +
           CASE WHEN $6::text <> '' AND upper(coalesce(m.attributes->>'connection', '')) = $6 THEN 0.15 ELSE 0 END +
@@ -258,7 +273,7 @@ export async function findCandidates(query: string, attributes: MaterialAttribut
       FROM materials m
       WHERE m.upload_id = (SELECT current_upload_id FROM material_settings WHERE id = 1)
         AND m.status_active = true
-        AND lower(m.class_name) LIKE $2
+        AND (lower(m.class_name) LIKE $2 OR ($8::text <> '' AND (m.sap_no LIKE '%' || $8 || '%' OR upper(m.corporate_no) LIKE '%' || $8 || '%')))
     )
     SELECT id, corporate_no, sap_no, plant, class_name, short_description, long_description,
       uom, material_type, unspsc, status, status_description, item_type_source, attributes,
@@ -267,7 +282,7 @@ export async function findCandidates(query: string, attributes: MaterialAttribut
     WHERE material_rank = 1
     ORDER BY (engineering_score * 0.65 + lexical_score * 0.15 + fuzzy_score * 0.2) DESC
     LIMIT $3`,
-    [query, classFilter, limit, attributes.subtype || "", attributes.sizeMm, attributes.connection || "", attributes.pressureClass || ""],
+    [query, classFilter, limit, attributes.subtype || "", attributes.sizeMm, attributes.connection || "", attributes.pressureClass || "", codeToken],
   );
   return rows.map((row) => ({
     id: String(row.id),
