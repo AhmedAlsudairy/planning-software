@@ -4,7 +4,7 @@ Engineering-aware SAP material matching built with Next.js, Neon Postgres, and t
 
 ## Features
 
-- Imports `.xlsx` and `.csv` material masters up to 50,000 rows
+- Imports `.xlsx` and `.csv` material masters up to 100,000 rows
 - Replaces the current searchable dataset atomically after a complete successful import
 - Maps the Jindal/iDXP columns used by the supplied 20,000-row workbook and preserves extra columns in `raw_data`
 - Excludes deleted and deletion-staged records by default

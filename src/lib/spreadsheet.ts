@@ -4,7 +4,7 @@ import { deriveSubtypeVocabulary, isActiveStatus, parseAttributes } from "@/lib/
 import type { MaterialImportRow } from "@/types/material";
 
 const REQUIRED_COLUMNS = ["Corporate No", "SAP No", "Class", "Short Description", "Long Description", "Status"];
-const MAX_ROWS = 50_000;
+const MAX_ROWS = 100_000;
 
 function cleanHeader(value: string): string {
   return value.replace(/^\uFEFF/, "").replace(/\s+/g, " ").trim();

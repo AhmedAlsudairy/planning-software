@@ -114,7 +114,42 @@ export class ImportInProgressError extends Error {
   }
 }
 
-const IMPORT_BATCH_SIZE = 500;
+const IMPORT_BATCH_SIZE = 3000;
+const IMPORT_CONCURRENCY = 6;
+
+const IMPORT_UPSERT_SQL = `INSERT INTO materials (
+    id, corporate_no, sap_no, plant, class_name, short_description, long_description,
+    uom, material_type, unspsc, status, status_description, item_type_source, attributes,
+    status_active, raw_data, upload_id
+  )
+  SELECT x.id, x.corporate_no, x.sap_no, x.plant, x.class_name, x.short_description,
+    x.long_description, x.uom, x.material_type, x.unspsc, x.status, x.status_description,
+    x.item_type_source, x.attributes, x.status_active, x.raw_data, x.upload_id
+  FROM jsonb_to_recordset($1::jsonb) AS x(
+    id text, corporate_no text, sap_no text, plant text, class_name text,
+    short_description text, long_description text, uom text, material_type text,
+    unspsc text, status text, status_description text, item_type_source text,
+    attributes jsonb, status_active boolean, raw_data jsonb, upload_id text
+  )
+  ON CONFLICT (upload_id, corporate_no, sap_no, plant) DO UPDATE SET
+    class_name = EXCLUDED.class_name,
+    short_description = EXCLUDED.short_description,
+    long_description = EXCLUDED.long_description,
+    uom = EXCLUDED.uom,
+    material_type = EXCLUDED.material_type,
+    unspsc = EXCLUDED.unspsc,
+    status = EXCLUDED.status,
+    status_description = EXCLUDED.status_description,
+    item_type_source = EXCLUDED.item_type_source,
+    attributes = EXCLUDED.attributes,
+    status_active = EXCLUDED.status_active,
+    raw_data = EXCLUDED.raw_data,
+    upload_id = EXCLUDED.upload_id,
+    embedding = CASE
+      WHEN materials.long_description = EXCLUDED.long_description AND materials.short_description = EXCLUDED.short_description THEN materials.embedding
+      ELSE NULL
+    END,
+    updated_at = now()`;
 
 export async function importMaterials(fileName: string, sheetName: string, rows: MaterialImportRow[]): Promise<string> {
   await ensureSchema();
@@ -141,61 +176,32 @@ async function runImport(sql: SqlClient, uploadId: string, fileName: string, she
   const uniqueRows = [...new Map(rows.map((row) => [`${row.corporateNo}|${row.sapNo}|${row.plant}`, row])).values()];
   const activeCount = uniqueRows.filter((row) => row.statusActive).length;
   await sql`INSERT INTO material_uploads (id, file_name, sheet_name, row_count, active_count) VALUES (${uploadId}, ${fileName}, ${sheetName}, ${uniqueRows.length}, ${activeCount})`;
-  for (let offset = 0; offset < uniqueRows.length; offset += IMPORT_BATCH_SIZE) {
-    const payload = uniqueRows.slice(offset, offset + IMPORT_BATCH_SIZE).map((row) => ({
-      id: randomUUID(),
-      corporate_no: row.corporateNo,
-      sap_no: row.sapNo,
-      plant: row.plant,
-      class_name: row.className,
-      short_description: row.shortDescription,
-      long_description: row.longDescription,
-      uom: row.uom,
-      material_type: row.materialType,
-      unspsc: row.unspsc,
-      status: row.status,
-      status_description: row.statusDescription,
-      item_type_source: row.itemTypeSource,
-      attributes: row.attributes,
-      status_active: row.statusActive,
-      raw_data: row.rawData,
-      upload_id: uploadId,
-    }));
-    await sql.query(
-      `INSERT INTO materials (
-        id, corporate_no, sap_no, plant, class_name, short_description, long_description,
-        uom, material_type, unspsc, status, status_description, item_type_source, attributes,
-        status_active, raw_data, upload_id
-      )
-      SELECT x.id, x.corporate_no, x.sap_no, x.plant, x.class_name, x.short_description,
-        x.long_description, x.uom, x.material_type, x.unspsc, x.status, x.status_description,
-        x.item_type_source, x.attributes, x.status_active, x.raw_data, x.upload_id
-      FROM jsonb_to_recordset($1::jsonb) AS x(
-        id text, corporate_no text, sap_no text, plant text, class_name text,
-        short_description text, long_description text, uom text, material_type text,
-        unspsc text, status text, status_description text, item_type_source text,
-        attributes jsonb, status_active boolean, raw_data jsonb, upload_id text
-      )
-      ON CONFLICT (upload_id, corporate_no, sap_no, plant) DO UPDATE SET
-        class_name = EXCLUDED.class_name,
-        short_description = EXCLUDED.short_description,
-        long_description = EXCLUDED.long_description,
-        uom = EXCLUDED.uom,
-        material_type = EXCLUDED.material_type,
-        unspsc = EXCLUDED.unspsc,
-        status = EXCLUDED.status,
-        status_description = EXCLUDED.status_description,
-        item_type_source = EXCLUDED.item_type_source,
-        attributes = EXCLUDED.attributes,
-        status_active = EXCLUDED.status_active,
-        raw_data = EXCLUDED.raw_data,
-        upload_id = EXCLUDED.upload_id,
-        embedding = CASE
-          WHEN materials.long_description = EXCLUDED.long_description AND materials.short_description = EXCLUDED.short_description THEN materials.embedding
-          ELSE NULL
-        END,
-        updated_at = now()`,
-      [JSON.stringify(payload)],
+  const batches: MaterialImportRow[][] = [];
+  for (let offset = 0; offset < uniqueRows.length; offset += IMPORT_BATCH_SIZE) batches.push(uniqueRows.slice(offset, offset + IMPORT_BATCH_SIZE));
+  for (let offset = 0; offset < batches.length; offset += IMPORT_CONCURRENCY) {
+    await Promise.all(
+      batches.slice(offset, offset + IMPORT_CONCURRENCY).map((batch) => {
+        const payload = batch.map((row) => ({
+          id: randomUUID(),
+          corporate_no: row.corporateNo,
+          sap_no: row.sapNo,
+          plant: row.plant,
+          class_name: row.className,
+          short_description: row.shortDescription,
+          long_description: row.longDescription,
+          uom: row.uom,
+          material_type: row.materialType,
+          unspsc: row.unspsc,
+          status: row.status,
+          status_description: row.statusDescription,
+          item_type_source: row.itemTypeSource,
+          attributes: row.attributes,
+          status_active: row.statusActive,
+          raw_data: row.rawData,
+          upload_id: uploadId,
+        }));
+        return sql.query(IMPORT_UPSERT_SQL, [JSON.stringify(payload)]);
+      }),
     );
   }
   await sql.query(
