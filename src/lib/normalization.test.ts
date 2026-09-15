@@ -36,6 +36,36 @@ describe("parseAttributes abbreviation handling", () => {
   });
 });
 
+describe("parseAttributes fuzzy matching (query-time typo tolerance)", () => {
+  it("does not recognize a misspelled subtype when fuzzy matching is off (import-time default)", () => {
+    expect(parseAttributes("BUTTRFLY VALVE DN150").subtype).toBeNull();
+  });
+
+  it("recognizes a misspelled subtype when fuzzy matching is requested", () => {
+    const result = parseAttributes("BUTTRFLY VALVE DN150", "", undefined, true);
+    expect(result.subtype).toBe("BUTTERFLY");
+    expect(result.itemType).toBe("VALVE");
+  });
+
+  it("recognizes a misspelled connection type", () => {
+    expect(parseAttributes("VALVE DN150 FLANGD", "", undefined, true).connection).toBe("FLANGED");
+  });
+
+  it("recognizes a misspelled item type keyword", () => {
+    expect(parseAttributes("VALEV DN150", "", undefined, true).itemType).toBe("VALVE");
+  });
+
+  it("does not fuzzy-match very short vocabulary codes", () => {
+    // 2-3 letter material codes (SS, CI, DI...) have too dense a neighborhood of unrelated real
+    // words within one edit to fuzz safely - they stay exact-only regardless of the flag.
+    expect(parseAttributes("SIX INCH FLANGE", "", undefined, true).materials).not.toContain("SS");
+  });
+
+  it("still requires an exact match for multi-word subtype terms", () => {
+    expect(parseAttributes("KNIF GATE VALVE DN150", "", ["KNIFE GATE"], true).subtype).toBeNull();
+  });
+});
+
 describe("isActiveStatus", () => {
   it("excludes deleted and deletion-staged records", () => {
     expect(isActiveStatus("A0-DELETED")).toBe(false);

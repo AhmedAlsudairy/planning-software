@@ -8,7 +8,7 @@ export async function runSearch(query: string, limit: number): Promise<SearchRes
   const started = performance.now();
   const warnings: string[] = [];
   const subtypeVocabulary = await getSubtypeVocabulary();
-  const deterministic = parseAttributes(query, "", subtypeVocabulary);
+  const deterministic = parseAttributes(query, "", subtypeVocabulary, true);
   let parsedQuery = deterministic;
   if (process.env.GEMINI_API_KEY) {
     try {
@@ -54,7 +54,7 @@ export async function runBatchSearch(items: string[], limit: number): Promise<Se
           return await runSearch(item, limit);
         } catch (error) {
           const message = error instanceof Error ? error.message : "Search failed";
-          return { query: item, parsedQuery: parseAttributes(item), matches: [], semanticMode: "lexical-fallback", warnings: [message], elapsedMs: 0 } satisfies SearchResponse;
+          return { query: item, parsedQuery: parseAttributes(item, "", undefined, true), matches: [], semanticMode: "lexical-fallback", warnings: [message], elapsedMs: 0 } satisfies SearchResponse;
         }
       }),
     );
