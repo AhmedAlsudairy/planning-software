@@ -12,7 +12,8 @@
     "test": "vitest run",
     "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
     "backfill-embeddings": "node --env-file=.env.local scripts/backfill-embeddings.mjs",
-    "backfill-attributes": "node --experimental-strip-types --env-file=.env.local scripts/backfill-attributes.ts"
+    "backfill-attributes": "node --experimental-strip-types --env-file=.env.local scripts/backfill-attributes.ts",
+    "eval-search": "vitest run --config vitest.eval.config.ts"
   },
   "dependencies": {
     "@google/genai": "^2.22.0",

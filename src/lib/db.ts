@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { buildDashboardInsights, percentage } from "@/lib/dashboard";
 import { deriveSubtypeVocabulary } from "@/lib/normalization";
+import { buildSearchText, expandAbbreviations } from "@/lib/vocabulary";
 import type { ClassQualityItem, DashboardAnalytics, DashboardSummary, DistributionItem, MissingPattern, PlantHealthItem, QualityMetric } from "@/types/dashboard";
 import type { MaterialAttributes, MaterialCandidate, MaterialImportRow } from "@/types/material";
 
@@ -58,34 +59,70 @@ export async function ensureSchema(): Promise<void> {
         status text NOT NULL DEFAULT '',
         status_description text NOT NULL DEFAULT '',
         item_type_source text NOT NULL DEFAULT '',
+        item_type text NOT NULL DEFAULT '',
+        material_group text NOT NULL DEFAULT '',
+        material_group_description text NOT NULL DEFAULT '',
+        normalized_short text NOT NULL DEFAULT '',
+        normalized_text text NOT NULL DEFAULT '',
         attributes jsonb NOT NULL DEFAULT '{}'::jsonb,
         status_active boolean NOT NULL DEFAULT true,
         raw_data jsonb NOT NULL DEFAULT '{}'::jsonb,
         embedding vector(768),
         upload_id text NOT NULL REFERENCES material_uploads(id),
         updated_at timestamptz NOT NULL DEFAULT now(),
-        search_text text GENERATED ALWAYS AS (
-          lower(class_name || ' ' || short_description || ' ' || long_description)
+        search_doc text GENERATED ALWAYS AS (lower(normalized_text)) STORED,
+        search_tsv tsvector GENERATED ALWAYS AS (
+          setweight(to_tsvector('simple'::regconfig, normalized_short), 'A') ||
+          setweight(to_tsvector('simple'::regconfig, normalized_text), 'B')
         ) STORED,
-        search_vector tsvector GENERATED ALWAYS AS (
-          to_tsvector('simple'::regconfig, class_name || ' ' || short_description || ' ' || long_description)
-        ) STORED,
-        status_rank smallint GENERATED ALWAYS AS (
-          CASE WHEN status = 'B2-ERP ACCEPTED' THEN 0 WHEN status LIKE 'C2-RFC%' THEN 1 ELSE 2 END
+        procurement_rank smallint GENERATED ALWAYS AS (
+          CASE
+            WHEN upper(status) LIKE '%BLOCKED%' THEN 3
+            WHEN status = 'B2-ERP ACCEPTED' THEN 0
+            WHEN status LIKE 'C2-RFC%' THEN 1
+            ELSE 2
+          END
         ) STORED,
         UNIQUE (upload_id, corporate_no, sap_no, plant)
       )
     `;
     await sql`ALTER TABLE materials DROP CONSTRAINT IF EXISTS materials_corporate_no_sap_no_plant_key`;
-    await sql`ALTER TABLE materials ADD COLUMN IF NOT EXISTS status_rank smallint GENERATED ALWAYS AS (
-      CASE WHEN status = 'B2-ERP ACCEPTED' THEN 0 WHEN status LIKE 'C2-RFC%' THEN 1 ELSE 2 END
+    // Columns added after the first release. The search columns below are GENERATED, so their
+    // expression cannot be altered in place - they are dropped under their old names and recreated
+    // under new ones, which keeps this block idempotent without a migration-version table. The
+    // stored data is rebuilt by the next import either way.
+    for (const column of [
+      `item_type text NOT NULL DEFAULT ''`,
+      `material_group text NOT NULL DEFAULT ''`,
+      `material_group_description text NOT NULL DEFAULT ''`,
+      `normalized_short text NOT NULL DEFAULT ''`,
+      `normalized_text text NOT NULL DEFAULT ''`,
+    ]) {
+      await sql.query(`ALTER TABLE materials ADD COLUMN IF NOT EXISTS ${column}`);
+    }
+    await sql`ALTER TABLE materials DROP COLUMN IF EXISTS search_text`;
+    await sql`ALTER TABLE materials DROP COLUMN IF EXISTS search_vector`;
+    await sql`ALTER TABLE materials DROP COLUMN IF EXISTS status_rank`;
+    await sql`ALTER TABLE materials ADD COLUMN IF NOT EXISTS search_doc text GENERATED ALWAYS AS (lower(normalized_text)) STORED`;
+    await sql`ALTER TABLE materials ADD COLUMN IF NOT EXISTS search_tsv tsvector GENERATED ALWAYS AS (
+      setweight(to_tsvector('simple'::regconfig, normalized_short), 'A') ||
+      setweight(to_tsvector('simple'::regconfig, normalized_text), 'B')
+    ) STORED`;
+    await sql`ALTER TABLE materials ADD COLUMN IF NOT EXISTS procurement_rank smallint GENERATED ALWAYS AS (
+      CASE
+        WHEN upper(status) LIKE '%BLOCKED%' THEN 3
+        WHEN status = 'B2-ERP ACCEPTED' THEN 0
+        WHEN status LIKE 'C2-RFC%' THEN 1
+        ELSE 2
+      END
     ) STORED`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS materials_upload_identity_idx ON materials(upload_id, corporate_no, sap_no, plant)`;
-    await sql`CREATE INDEX IF NOT EXISTS materials_search_vector_idx ON materials USING gin(search_vector)`;
-    await sql`CREATE INDEX IF NOT EXISTS materials_search_trgm_idx ON materials USING gin(search_text gin_trgm_ops)`;
-    await sql`CREATE INDEX IF NOT EXISTS materials_filter_idx ON materials(status_active, class_name)`;
-    await sql`CREATE INDEX IF NOT EXISTS materials_class_trgm_idx ON materials USING gin(lower(class_name) gin_trgm_ops)`;
-    await sql`CREATE INDEX IF NOT EXISTS materials_dedup_idx ON materials(upload_id, status_active, corporate_no, sap_no, status_rank, updated_at DESC)`;
+    await sql`CREATE INDEX IF NOT EXISTS materials_search_tsv_idx ON materials USING gin(search_tsv)`;
+    await sql`CREATE INDEX IF NOT EXISTS materials_search_doc_trgm_idx ON materials USING gin(search_doc gin_trgm_ops)`;
+    await sql`CREATE INDEX IF NOT EXISTS materials_item_type_idx ON materials(upload_id, status_active, item_type)`;
+    await sql`CREATE INDEX IF NOT EXISTS materials_sap_no_idx ON materials(upload_id, sap_no)`;
+    await sql`CREATE INDEX IF NOT EXISTS materials_size_idx ON materials(upload_id, status_active, ((attributes->>'sizeMm')::double precision))`;
+    await sql`CREATE INDEX IF NOT EXISTS materials_dedup_idx ON materials(upload_id, status_active, corporate_no, sap_no, procurement_rank, updated_at DESC)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_embedding_idx ON materials USING hnsw(embedding vector_cosine_ops)`;
   })().catch((error) => {
     schemaPromise = null;
@@ -101,8 +138,8 @@ export async function getSubtypeVocabulary(): Promise<string[]> {
   if (subtypeVocabularyCache && subtypeVocabularyCache.expiresAt > Date.now()) return subtypeVocabularyCache.terms;
   await ensureSchema();
   const sql = getSql();
-  const rows = await sql`SELECT DISTINCT class_name FROM materials WHERE upload_id = (SELECT current_upload_id FROM material_settings WHERE id = 1) AND status_active = true`;
-  const terms = deriveSubtypeVocabulary(rows.map((row) => String(row.class_name)));
+  const rows = await sql`SELECT short_description, class_name FROM materials WHERE upload_id = (SELECT current_upload_id FROM material_settings WHERE id = 1) AND status_active = true`;
+  const terms = deriveSubtypeVocabulary(rows.map((row) => `${String(row.short_description)} ${String(row.class_name)}`));
   subtypeVocabularyCache = { terms, expiresAt: Date.now() + SUBTYPE_VOCABULARY_TTL_MS };
   return terms;
 }
@@ -119,17 +156,20 @@ const IMPORT_CONCURRENCY = 6;
 
 const IMPORT_UPSERT_SQL = `INSERT INTO materials (
     id, corporate_no, sap_no, plant, class_name, short_description, long_description,
-    uom, material_type, unspsc, status, status_description, item_type_source, attributes,
+    uom, material_type, unspsc, status, status_description, item_type_source, item_type,
+    material_group, material_group_description, normalized_short, normalized_text, attributes,
     status_active, raw_data, upload_id
   )
   SELECT x.id, x.corporate_no, x.sap_no, x.plant, x.class_name, x.short_description,
     x.long_description, x.uom, x.material_type, x.unspsc, x.status, x.status_description,
-    x.item_type_source, x.attributes, x.status_active, x.raw_data, x.upload_id
+    x.item_type_source, x.item_type, x.material_group, x.material_group_description,
+    x.normalized_short, x.normalized_text, x.attributes, x.status_active, x.raw_data, x.upload_id
   FROM jsonb_to_recordset($1::jsonb) AS x(
     id text, corporate_no text, sap_no text, plant text, class_name text,
     short_description text, long_description text, uom text, material_type text,
-    unspsc text, status text, status_description text, item_type_source text,
-    attributes jsonb, status_active boolean, raw_data jsonb, upload_id text
+    unspsc text, status text, status_description text, item_type_source text, item_type text,
+    material_group text, material_group_description text, normalized_short text,
+    normalized_text text, attributes jsonb, status_active boolean, raw_data jsonb, upload_id text
   )
   ON CONFLICT (upload_id, corporate_no, sap_no, plant) DO UPDATE SET
     class_name = EXCLUDED.class_name,
@@ -141,6 +181,11 @@ const IMPORT_UPSERT_SQL = `INSERT INTO materials (
     status = EXCLUDED.status,
     status_description = EXCLUDED.status_description,
     item_type_source = EXCLUDED.item_type_source,
+    item_type = EXCLUDED.item_type,
+    material_group = EXCLUDED.material_group,
+    material_group_description = EXCLUDED.material_group_description,
+    normalized_short = EXCLUDED.normalized_short,
+    normalized_text = EXCLUDED.normalized_text,
     attributes = EXCLUDED.attributes,
     status_active = EXCLUDED.status_active,
     raw_data = EXCLUDED.raw_data,
@@ -195,6 +240,13 @@ async function runImport(sql: SqlClient, uploadId: string, fileName: string, she
           status: row.status,
           status_description: row.statusDescription,
           item_type_source: row.itemTypeSource,
+          item_type: row.attributes.itemType || "",
+          material_group: row.materialGroup,
+          material_group_description: row.materialGroupDescription,
+          // The indexed text carries both the catalog's abbreviations and their expansions, so a
+          // search for "flange" reaches a row stored as "FLNG PIPE" and vice versa.
+          normalized_short: buildSearchText(row.shortDescription),
+          normalized_text: buildSearchText(row.className, row.shortDescription, row.longDescription),
           attributes: row.attributes,
           status_active: row.statusActive,
           raw_data: row.rawData,
@@ -243,8 +295,8 @@ function parseEmbedding(value: unknown): number[] | null {
 }
 
 // A SAP code or corporate number never resembles an engineering description, so lexical/trigram
-// text scoring against class_name+description never finds it. Detect that shape and look it up
-// directly instead of only scoring free text.
+// text scoring against the description never finds it. Detect that shape and look it up directly
+// instead of only scoring free text.
 function extractCodeToken(query: string): string {
   const trimmed = query.trim().toUpperCase().replace(/\s+/g, "");
   if (/^\d{4,}$/.test(trimmed)) return trimmed;
@@ -253,49 +305,137 @@ function extractCodeToken(query: string): string {
   return "";
 }
 
+// A tsquery of OR'd lexemes. plainto_tsquery, used previously, joins every term with AND, so a
+// descriptive query like "slip on flange raised face DN40 carbon steel class 150" required all
+// eleven lexemes to appear in one row and therefore scored zero against the entire catalog.
+// Partial overlap has to count for something; how much is then decided by ranking, not by the
+// filter. The token list comes from buildSearchText, so an abbreviated query and a spelled-out one
+// produce the same lexemes.
+const NO_MATCH_LEXEME = "zzzzzznomatch";
+
+function buildTsQuery(query: string): string {
+  const tokens = [...new Set(buildSearchText(query).split(" "))]
+    .map((token) => token.replace(/[^A-Z0-9]/g, ""))
+    .filter((token) => token.length > 1);
+  return tokens.length ? tokens.join(" | ") : NO_MATCH_LEXEME;
+}
+
+// Retrieval runs as four independent arms whose ids are unioned before anything is scored: an
+// exact-code arm, a lexical arm, a trigram arm and an attribute arm. Any single arm can come back
+// empty without emptying the result set. The previous implementation gated every candidate behind
+// one class-name LIKE filter, so a single unlucky item-type guess returned nothing at all for a
+// part that was sitting in stock.
+const CANDIDATE_SQL = `WITH base AS (
+    SELECT m.* FROM materials m
+    WHERE m.upload_id = (SELECT current_upload_id FROM material_settings WHERE id = 1)
+      AND m.status_active = true
+  ),
+  code_arm AS (
+    SELECT id FROM base
+    WHERE $8::text <> ''
+      AND (sap_no = $8 OR upper(corporate_no) = $8 OR sap_no LIKE '%' || $8 || '%' OR upper(corporate_no) LIKE '%' || $8 || '%')
+    LIMIT 100
+  ),
+  lexical_arm AS (
+    SELECT id FROM base
+    WHERE search_tsv @@ to_tsquery('simple', $2)
+    ORDER BY ts_rank_cd(search_tsv, to_tsquery('simple', $2)) DESC
+    LIMIT $9
+  ),
+  trigram_arm AS (
+    SELECT id FROM base
+    WHERE lower($1) <% search_doc
+    ORDER BY word_similarity(lower($1), search_doc) DESC
+    LIMIT $9
+  ),
+  attribute_arm AS (
+    SELECT id FROM base
+    WHERE $3::text <> '' AND item_type = $3
+      AND ($4::double precision IS NULL
+        OR (attributes->>'sizeMm' IS NOT NULL AND abs((attributes->>'sizeMm')::double precision - $4) <= 1))
+    LIMIT $9
+  ),
+  pool AS (
+    SELECT id FROM code_arm
+    UNION SELECT id FROM lexical_arm
+    UNION SELECT id FROM trigram_arm
+    UNION SELECT id FROM attribute_arm
+  ),
+  scored AS (
+    SELECT b.*,
+      (($8::text <> '' AND (b.sap_no = $8 OR upper(b.corporate_no) = $8)) OR lower(b.short_description) = lower($1)) AS exact_match,
+      ts_rank_cd(b.search_tsv, to_tsquery('simple', $2)) AS raw_lexical,
+      word_similarity(lower($1), b.search_doc) AS fuzzy_score,
+      -- These weights sum to 1.0 so the result is directly comparable with the text scores below.
+      -- The previous ranking added raw ts_rank_cd values (typically 0.01-0.1) to attribute bonuses
+      -- worth up to 1.15, which let one attribute hit outweigh every word in the description.
+      (
+        CASE WHEN $3::text = '' THEN 0.12 WHEN b.item_type = $3 THEN 0.30 ELSE 0 END +
+        CASE WHEN coalesce(array_length($7::text[], 1), 0) > 0
+          AND coalesce(b.attributes->'subtypes', '[]'::jsonb) ?| $7::text[] THEN 0.22 ELSE 0 END +
+        CASE WHEN $4::double precision IS NOT NULL AND b.attributes->>'sizeMm' IS NOT NULL
+          AND abs((b.attributes->>'sizeMm')::double precision - $4) <= 1 THEN 0.28 ELSE 0 END +
+        CASE WHEN $5::text <> '' AND upper(coalesce(b.attributes->>'connection', '')) = $5 THEN 0.10 ELSE 0 END +
+        CASE WHEN $6::text <> '' AND upper(coalesce(b.attributes->>'pressureClass', '')) = $6 THEN 0.10 ELSE 0 END
+      ) AS engineering_score
+    FROM base b JOIN pool p ON p.id = b.id
+  ),
+  ranked AS (
+    SELECT s.*,
+      CASE WHEN s.exact_match THEN 10
+        ELSE 0.45 * s.engineering_score
+           + 0.30 * (s.raw_lexical / (1 + s.raw_lexical))
+           + 0.25 * s.fuzzy_score
+      END AS final_score,
+      row_number() OVER (
+        PARTITION BY s.corporate_no, s.sap_no
+        ORDER BY s.procurement_rank, s.updated_at DESC
+      ) AS material_rank
+    FROM scored s
+  )
+  SELECT r.id, r.corporate_no, r.sap_no, r.plant, r.class_name, r.short_description, r.long_description,
+    r.uom, r.material_type, r.material_group, r.material_group_description, r.unspsc, r.status,
+    r.status_description, r.item_type_source, r.attributes, r.status_active, r.raw_data,
+    r.embedding::text, r.raw_lexical, r.fuzzy_score, r.exact_match,
+    -- One row per material: every plant carrying this code is collected onto the single surviving
+    -- row, instead of returning the same part once per plant. 2,453 of 8,221 materials in a real
+    -- export are stocked at more than one plant.
+    (SELECT array_agg(DISTINCT b2.plant) FROM base b2
+      WHERE b2.corporate_no = r.corporate_no AND b2.sap_no = r.sap_no AND b2.plant <> '') AS plants
+  FROM ranked r
+  WHERE r.material_rank = 1
+  ORDER BY r.final_score DESC, r.procurement_rank
+  LIMIT $10`;
+
+// ts_rank_cd is unbounded, while every other signal the matcher combines is a 0..1 fraction.
+function normalizedLexical(rank: number): number {
+  return rank <= 0 ? 0 : rank / (1 + rank);
+}
+
 export async function findCandidates(query: string, attributes: MaterialAttributes, limit = 24): Promise<MaterialCandidate[]> {
   await ensureSchema();
   const sql = getSql();
-  const classFilter = attributes.itemType ? `%${attributes.itemType.toLowerCase()}%` : "%";
-  const codeToken = extractCodeToken(query);
-  const rows = await sql.query(
-    `WITH scored AS (
-      SELECT m.*,
-        (CASE WHEN $8::text <> '' AND (m.sap_no LIKE '%' || $8 || '%' OR upper(m.corporate_no) LIKE '%' || $8 || '%') THEN 1
-              ELSE ts_rank_cd(m.search_vector, plainto_tsquery('simple', $1)) END) AS lexical_score,
-        (CASE WHEN $8::text <> '' AND (m.sap_no LIKE '%' || $8 || '%' OR upper(m.corporate_no) LIKE '%' || $8 || '%') THEN 1
-              ELSE greatest(similarity(m.search_text, lower($1)), word_similarity(lower($1), m.search_text)) END) AS fuzzy_score,
-        (
-          CASE WHEN $8::text <> '' AND (m.sap_no LIKE '%' || $8 || '%' OR upper(m.corporate_no) LIKE '%' || $8 || '%') THEN 3 ELSE 0 END +
-          CASE WHEN $4::text <> '' AND (upper(coalesce(m.attributes->>'subtype', '')) = $4 OR upper(m.class_name) LIKE '%' || $4 || '%') THEN 0.5 ELSE 0 END +
-          CASE WHEN $5::double precision IS NOT NULL AND m.attributes->>'sizeMm' IS NOT NULL AND abs((m.attributes->>'sizeMm')::double precision - $5) <= 1 THEN 0.35 ELSE 0 END +
-          CASE WHEN $6::text <> '' AND upper(coalesce(m.attributes->>'connection', '')) = $6 THEN 0.15 ELSE 0 END +
-          CASE WHEN $7::text <> '' AND upper(coalesce(m.attributes->>'pressureClass', '')) = $7 THEN 0.15 ELSE 0 END
-        ) AS engineering_score,
-        row_number() OVER (
-          PARTITION BY m.corporate_no, m.sap_no
-          ORDER BY m.status_rank, m.updated_at DESC
-        ) AS material_rank
-      FROM materials m
-      WHERE m.upload_id = (SELECT current_upload_id FROM material_settings WHERE id = 1)
-        AND m.status_active = true
-        AND (lower(m.class_name) LIKE $2 OR ($8::text <> '' AND (m.sap_no LIKE '%' || $8 || '%' OR upper(m.corporate_no) LIKE '%' || $8 || '%')))
-    )
-    SELECT id, corporate_no, sap_no, plant, class_name, short_description, long_description,
-      uom, material_type, unspsc, status, status_description, item_type_source, attributes,
-      status_active, raw_data, embedding::text, lexical_score, fuzzy_score
-    FROM scored
-    WHERE material_rank = 1
-    ORDER BY (engineering_score * 0.65 + lexical_score * 0.15 + fuzzy_score * 0.2) DESC
-    LIMIT $3`,
-    [query, classFilter, limit, attributes.subtype || "", attributes.sizeMm, attributes.connection || "", attributes.pressureClass || "", codeToken],
-  );
+  const rows = await sql.query(CANDIDATE_SQL, [
+    query,
+    buildTsQuery(query),
+    attributes.itemType ? expandAbbreviations(attributes.itemType).toUpperCase() : "",
+    attributes.sizeMm,
+    attributes.connection || "",
+    attributes.pressureClass || "",
+    attributes.subtypes?.length ? attributes.subtypes : (attributes.subtype ? [attributes.subtype] : []),
+    extractCodeToken(query),
+    Math.max(limit * 3, 150),
+    limit,
+  ]);
   return rows.map((row) => ({
     id: String(row.id),
     corporateNo: String(row.corporate_no),
     sapNo: String(row.sap_no),
     plant: String(row.plant),
+    plants: [...new Set(((row.plants as string[] | null) ?? [String(row.plant)]).filter(Boolean))].sort(),
     className: String(row.class_name),
+    materialGroup: String(row.material_group ?? ""),
+    materialGroupDescription: String(row.material_group_description ?? ""),
     shortDescription: String(row.short_description),
     longDescription: String(row.long_description),
     uom: String(row.uom),
@@ -308,11 +448,11 @@ export async function findCandidates(query: string, attributes: MaterialAttribut
     statusActive: Boolean(row.status_active),
     rawData: row.raw_data as Record<string, string>,
     embedding: parseEmbedding(row.embedding),
-    lexicalScore: Math.max(0, Number(row.lexical_score) || 0),
+    lexicalScore: normalizedLexical(Number(row.raw_lexical) || 0),
     fuzzyScore: Math.max(0, Number(row.fuzzy_score) || 0),
+    exactMatch: Boolean(row.exact_match),
   }));
 }
-
 export async function saveEmbedding(id: string, embedding: number[]): Promise<void> {
   const sql = getSql();
   await sql.query("UPDATE materials SET embedding = $1::vector, updated_at = updated_at WHERE id = $2", [`[${embedding.join(",")}]`, id]);

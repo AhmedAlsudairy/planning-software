@@ -9,6 +9,7 @@ const matchSchema = z.object({
   corporateNo: z.string(),
   sapNo: z.string(),
   plant: z.string(),
+  plants: z.array(z.string()).default([]),
   className: z.string(),
   confidence: z.number(),
   parametricScore: z.number(),
@@ -16,6 +17,8 @@ const matchSchema = z.object({
   shortDescription: z.string(),
   longDescription: z.string(),
   status: z.string(),
+  blocked: z.boolean().default(false),
+  exactMatch: z.boolean().default(false),
   comparisons: z.array(comparisonSchema),
   mismatches: z.array(z.string()),
 });
@@ -37,15 +40,28 @@ export async function POST(request: Request) {
       { header: "Confidence", key: "confidence", width: 14 },
       { header: "Corporate No", key: "corporateNo", width: 20 },
       { header: "SAP No", key: "sapNo", width: 24 },
-      { header: "Plant", key: "plant", width: 12 },
+      { header: "Plants", key: "plants", width: 24 },
       { header: "Class", key: "className", width: 26 },
       { header: "Short Description", key: "shortDescription", width: 48 },
       { header: "Status", key: "status", width: 22 },
+      { header: "Availability", key: "availability", width: 26 },
+      { header: "Match type", key: "matchType", width: 14 },
       { header: "Parametric Score", key: "parametricScore", width: 18 },
       { header: "Semantic Score", key: "semanticScore", width: 18 },
       { header: "Differences", key: "differences", width: 60 },
     ];
-    groups.forEach((group) => group.matches.forEach((match) => summary.addRow({ ...match, sourceQuery: group.query, confidence: `${match.confidence}%`, parametricScore: `${match.parametricScore}%`, semanticScore: `${match.semanticScore}%`, differences: match.mismatches.join(" | ") })));
+    groups.forEach((group) => group.matches.forEach((match) => summary.addRow({
+      ...match,
+      sourceQuery: group.query,
+      plants: (match.plants.length ? match.plants : [match.plant]).filter(Boolean).join(", "),
+      confidence: `${match.confidence}%`,
+      parametricScore: `${match.parametricScore}%`,
+      semanticScore: `${match.semanticScore}%`,
+      // Spelled out rather than left as a flag: this column decides whether a buyer can raise a PO.
+      availability: match.blocked ? "Blocked for procurement" : "Available",
+      matchType: match.exactMatch ? "Exact" : "Similar",
+      differences: match.mismatches.join(" | "),
+    })));
     summary.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
     summary.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF15362F" } };
     summary.views = [{ state: "frozen", ySplit: 1 }];
@@ -65,7 +81,7 @@ export async function POST(request: Request) {
     details.views = [{ state: "frozen", ySplit: 1 }];
     if (!("results" in parsed)) {
       summary.insertRow(1, ["Search query", parsed.query]);
-      summary.mergeCells("B1:L1");
+      summary.mergeCells("B1:N1");
     }
     const buffer = await workbook.xlsx.writeBuffer();
     return new Response(buffer as BodyInit, {
