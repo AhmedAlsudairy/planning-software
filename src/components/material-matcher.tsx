@@ -13,7 +13,6 @@ interface Stats {
   error?: string;
 }
 
-const EXAMPLE = "VALVE, BUTTERFLY, DN300, PN10, WAFER, EN593, BODY: CI, DISC/STEM: SS, EPDM, FF: 78MM";
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-IN").format(value);
@@ -258,7 +257,7 @@ export default function MaterialMatcher() {
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-lg shadow-slate-900/5">
             <div className="mb-4 flex items-center justify-between"><div><span className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-700">Step 02</span><h2 className="mt-1 text-xl font-bold">Target specification</h2></div><Search className="text-slate-300" /></div>
             <textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe item type, size, pressure, connection, materials and standards… (one specification per line to search several at once)" className="h-36 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:bg-white focus:ring-4 focus:ring-emerald-600/10" />
-            <div className="mt-3 flex items-center justify-between gap-4"><button onClick={() => setQuery(EXAMPLE)} className="text-left text-xs font-semibold text-emerald-700 hover:text-emerald-900">Use butterfly valve example</button><span className="text-xs text-slate-400">{query.length}/2,000</span></div>
+            <div className="mt-3 flex items-center justify-end gap-4"><span className="text-xs text-slate-400">{query.length}/2,000</span></div>
             <button onClick={search} disabled={searching || bulkSearching || query.trim().length < 3 || !stats.materials} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{searching ? <LoaderCircle className="animate-spin" size={18} /> : <Sparkles size={18} />}{searching ? "Parsing and ranking candidates…" : "Find matching materials"}<ArrowRight size={17} /></button>
             <div className="mt-4 flex items-center gap-3 border-t border-slate-100 pt-4">
               <input ref={bulkSearchInputRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={(event) => bulkSearchFromFile(event.target.files?.[0])} />
