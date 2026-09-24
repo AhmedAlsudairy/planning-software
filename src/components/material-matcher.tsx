@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowRight, BarChart3, Check, ChevronDown, Clipboard, CloudUpload, Database, Download, FileSpreadsheet, LoaderCircle, Printer, Search, ShieldCheck, Sparkles, TriangleAlert, X } from "lucide-react";
+import { AlertCircle, ArrowRight, BadgeCheck, BarChart3, Ban, Check, ChevronDown, Clipboard, CloudUpload, Database, Download, FileSpreadsheet, Factory, LoaderCircle, Printer, Search, ShieldCheck, Sparkles, TriangleAlert, X } from "lucide-react";
 import type { MaterialAttributes, MaterialMatch, SearchResponse, UploadSummary } from "@/types/material";
 
 interface Stats {
@@ -20,7 +20,21 @@ function formatNumber(value: number): string {
 }
 
 function AttributePills({ attributes }: { attributes: MaterialAttributes }) {
-  const values = [attributes.itemType, attributes.subtype, attributes.sizeDisplay, attributes.pressureClass, attributes.connection, attributes.faceToFaceMm == null ? null : `FF ${attributes.faceToFaceMm}MM`, ...attributes.materials, ...attributes.standards].filter(Boolean);
+  const values = [
+    attributes.itemType,
+    ...(attributes.subtypes?.length ? attributes.subtypes : [attributes.subtype]),
+    attributes.sizeDisplay,
+    attributes.sizeMm2 == null ? null : `x ${attributes.sizeMm2}MM`,
+    attributes.schedule,
+    attributes.angleDeg == null ? null : `${attributes.angleDeg}°`,
+    attributes.wallThicknessMm == null ? null : `WT ${attributes.wallThicknessMm}MM`,
+    attributes.pressureClass,
+    attributes.connection,
+    attributes.make,
+    attributes.faceToFaceMm == null ? null : `FF ${attributes.faceToFaceMm}MM`,
+    ...attributes.materials,
+    ...attributes.standards,
+  ].filter(Boolean);
   return <div className="flex flex-wrap gap-2">{values.map((value, index) => <span key={`${value}-${index}`} className="rounded-md border border-emerald-900/10 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-900">{value}</span>)}</div>;
 }
 
@@ -28,6 +42,21 @@ function confidenceTone(value: number): string {
   if (value >= 85) return "bg-emerald-500 text-white";
   if (value >= 65) return "bg-amber-400 text-amber-950";
   return "bg-rose-500 text-white";
+}
+
+// A material stocked at several plants is one material, so the plants are listed on its single row
+// rather than repeating the row per plant. Beyond four the list is summarised to keep the card calm.
+function PlantList({ plants }: { plants: string[] }) {
+  if (!plants.length) return <span className="text-xs text-slate-400">Plant —</span>;
+  const shown = plants.slice(0, 4);
+  const remaining = plants.length - shown.length;
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-slate-500">
+      <Factory size={12} className="text-slate-400" />
+      <span>{plants.length === 1 ? "Plant" : `${plants.length} plants`}</span>
+      <span className="font-mono text-slate-600">{shown.join(", ")}{remaining > 0 ? ` +${remaining}` : ""}</span>
+    </span>
+  );
 }
 
 function MatchCard({ match }: { match: MaterialMatch }) {
@@ -44,13 +73,15 @@ function MatchCard({ match }: { match: MaterialMatch }) {
         <div className="min-w-0">
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <span className="rounded-md bg-slate-900 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-white">{match.className}</span>
-            <span className="rounded-md bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">{match.status}</span>
-            <span className="text-xs text-slate-400">Plant {match.plant || "—"}</span>
+            {match.exactMatch ? <span className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-white"><BadgeCheck size={12} />Exact match</span> : null}
+            {match.blocked ? <span className="inline-flex items-center gap-1 rounded-md bg-rose-100 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-rose-700"><Ban size={12} />Blocked for procurement</span> : null}
+            {match.status && !match.blocked ? <span className="rounded-md bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">{match.status}</span> : null}
+            <PlantList plants={match.plants} />
           </div>
           <h3 className="text-lg font-bold tracking-tight text-slate-950">{match.shortDescription}</h3>
           <p className="mt-2 line-clamp-2 text-sm leading-6 text-slate-600">{match.longDescription}</p>
           <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-sm">
-            <span><span className="text-slate-400">Corporate</span> <strong className="ml-1 text-slate-800">{match.corporateNo}</strong></span>
+            {match.corporateNo ? <span><span className="text-slate-400">Corporate</span> <strong className="ml-1 text-slate-800">{match.corporateNo}</strong></span> : null}
             <button onClick={copySap} className="inline-flex items-center gap-1.5 text-left"><span className="text-slate-400">SAP</span> <strong className="font-mono text-slate-800">{match.sapNo}</strong>{copied ? <Check size={14} className="text-emerald-600" /> : <Clipboard size={14} className="text-slate-400" />}</button>
           </div>
         </div>

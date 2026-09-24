@@ -16,8 +16,8 @@ function canonical(value: unknown): string {
 }
 
 async function main() {
-  const classNameRows = await sql`SELECT DISTINCT class_name FROM materials WHERE status_active = true`;
-  const subtypeVocabulary = deriveSubtypeVocabulary(classNameRows.map((row) => String(row.class_name)));
+  const vocabularyRows = await sql`SELECT short_description, class_name FROM materials WHERE status_active = true`;
+  const subtypeVocabulary = deriveSubtypeVocabulary(vocabularyRows.map((row) => `${String(row.short_description)} ${String(row.class_name)}`));
   console.log(`Derived ${subtypeVocabulary.length} subtype terms from the active dataset.`);
   let processed = 0;
   let changed = 0;

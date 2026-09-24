@@ -1,14 +1,8 @@
 import type { MaterialAttributes } from "@/types/material";
-
-const CONNECTIONS = ["DOUBLE FLANGED", "FLANGED", "FLANGE", "WAFER", "LUG", "THREADED", "SCREWED", "SOCKET WELD", "BUTT WELD", "BSP", "NPT", "RTJ", "RF"];
-// Used only when no data-derived vocabulary is available (e.g. tests, or before the first import).
-// db.ts:getSubtypeVocabulary() supersedes this at runtime by learning subtype terms from class_name.
-const FALLBACK_SUBTYPES = ["BUTTERFLY", "SOLENOID", "CHECK", "CONTROL", "RELIEF", "BALL", "GATE", "GLOBE", "NEEDLE", "PLUG", "DIAPHRAGM", "KNIFE GATE", "NON RETURN"];
-const ACTUATIONS = ["ELECTRIC", "PNEUMATIC", "HYDRAULIC", "MANUAL", "LEVER", "GEAR OPERATED", "GEARBOX", "AUTOMATIC", "PILOT OPERATED"];
-const KNOWN_MATERIALS = ["CF8M", "CF8", "SS 316L", "SS316L", "SS 316", "SS316", "SS 304", "SS304", "SS", "STAINLESS STEEL", "DUCTILE IRON", "NODULAR CI", "CAST IRON", "CI", "DI", "EPDM", "NBR", "PTFE", "PFA", "VITON", "FKM", "BRONZE", "BRASS", "WCB", "WC6", "CS", "PVC", "CPVC"];
+import { ACTUATIONS, CONNECTIONS, deriveItemType, expandAbbreviations, FALLBACK_SUBTYPES, ITEM_TYPE_LIST, KNOWN_MATERIALS, unescapeSapText } from "./vocabulary.ts";
 
 export function normalizeText(value: string): string {
-  return value
+  return unescapeSapText(value)
     .normalize("NFKC")
     .toUpperCase()
     .replace(/[–—]/g, "-")
@@ -17,14 +11,72 @@ export function normalizeText(value: string): string {
     .trim();
 }
 
+// SAP long text is assembled from fixed-width lines, and when those lines are joined the space at
+// the seam is lost: "MATERIAL SPECIFICATION" arrives as "MATERIALSPECIFICATION", and a value runs
+// straight into the next label as "6MMMATERIAL:". Both forms defeat label-based extraction, so the
+// known labels are put back before anything is parsed. Restricting the repair to text followed by
+// a colon keeps it from rewriting ordinary prose.
+const LABEL_PHRASES = [
+  "TUBE OUTSIDE DIAMETER", "TUBE CONNECTION TYPE", "PIPE CONNECTION TYPE", "MANUFACTURING PROCESS",
+  "ADDITIONAL INFORMATION", "MATERIAL SPECIFICATION", "NOMINAL PIPE SIZE", "SURFACE TREATMENT",
+  "OUTSIDE DIAMETER", "INSIDE DIAMETER", "PRESSURE RATING", "SCHEDULE RATING", "WALL THICKNESS",
+  "CONNECTION TYPE", "CONNECTION SIZE", "MATERIAL GRADE", "NOMINAL SIZE", "BODY MATERIAL",
+  "SEAT MATERIAL", "DISC MATERIAL", "STEM MATERIAL", "FACE TO FACE",
+].sort((left, right) => right.length - left.length);
+
+function repairLabels(value: string): string {
+  let result = value;
+  for (const phrase of LABEL_PHRASES) {
+    const pattern = new RegExp(`([A-Z0-9])?${phrase.split(" ").join("\\s*")}(?=\\s*:)`, "g");
+    result = result.replace(pattern, (_match, prefix: string | undefined) => `${prefix ? `${prefix} ` : ""}${phrase}`);
+  }
+  return result;
+}
+
+// The same lost-space problem detaches units from what follows them: "16MMODPIPE-AL" is
+// "16MM OD PIPE-AL", and "10BARAPPLICATION" is "10BAR APPLICATION". Both hide a real value behind a
+// word boundary that never matches. Only these specific continuations are separated - splitting on
+// any trailing letter would turn "3INCH" into "3IN CH".
+function separateGluedUnits(value: string): string {
+  return value
+    .replace(/(\d)\s*MM(?=[A-Z])/g, "$1MM ")
+    .replace(/(\d)\s*IN(?=(?:OD|ID))/g, "$1IN ")
+    .replace(/(\d)\s*(BAR|PSI)(?=[A-Z])/g, "$1$2 ");
+}
+
+function repairText(value: string): string {
+  return separateGluedUnits(repairLabels(value));
+}
+
 function displayNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
 }
 
-function extractLabeled(text: string, labels: string[]): string | null {
+// 4,534 of 12,257 rows in a real export carry a newline-delimited "LABEL: VALUE" block. Splitting
+// on those separators first and reading each segment on its own is far more reliable than running
+// lazy regexes across the whole flattened string, where a value can silently absorb the next label.
+function segments(value: string): string[] {
+  return unescapeSapText(value)
+    .normalize("NFKC")
+    .toUpperCase()
+    .split(/[\n\r;]+/)
+    .map((segment) => repairText(segment.replace(/\s+/g, " ")).trim())
+    .filter(Boolean);
+}
+
+function extractLabeled(lines: string[], labels: string[]): string | null {
   const escaped = labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  const match = text.match(new RegExp(`(?:${escaped})\\s*:\\s*([^;]+?)(?=\\s+[A-Z][A-Z0-9 /&_-]{2,35}\\s*:|$)`, "i"));
-  return match?.[1]?.replace(/[, ]+$/, "").trim() || null;
+  const exact = new RegExp(`(?:^|[^A-Z])(?:${escaped})\\s*:\\s*(.+)$`);
+  for (const line of lines) {
+    const match = line.match(exact);
+    if (match?.[1]) {
+      // A label may still share a line with the label that follows it; stop at that boundary.
+      const value = match[1].split(/\s+[A-Z][A-Z0-9 /&_-]{2,35}\s*:/)[0];
+      const cleaned = value.replace(/[, ]+$/, "").trim();
+      if (cleaned) return cleaned;
+    }
+  }
+  return null;
 }
 
 // Damerau-Levenshtein (optimal string alignment): edit distance where an adjacent transposition
@@ -65,37 +117,98 @@ function fuzzyContainsWord(text: string, term: string): boolean {
 }
 
 function containsTerm(text: string, term: string, fuzzy = false): boolean {
-  const exact = new RegExp(`(?:^|[^A-Z0-9])${term.replace(/\s+/g, "\\s*").replace(/\//g, "\\/")}(?:$|[^A-Z0-9])`).test(text);
+  // A space inside a term may arrive as a hyphen, or as nothing at all: the catalog writes slip-on
+  // as "SLIP ON", "SLP-ON" and "SLIPON" in different rows.
+  const exact = new RegExp(`(?:^|[^A-Z0-9])${term.replace(/\s+/g, "[\\s-]*").replace(/\//g, "\\/")}(?:$|[^A-Z0-9])`).test(text);
   if (exact || !fuzzy || term.includes(" ")) return exact;
   return fuzzyContainsWord(text, term);
 }
 
+// Every term in the list that the text states, most specific first. Capped because the score is an
+// overlap ratio: a description listing twenty modifiers should not dilute the ones that matter.
+const MAX_MATCHED_TERMS = 8;
+
+function findTerms(text: string, terms: string[], fuzzy = false): string[] {
+  const exact = terms.filter((term) => containsTerm(text, term));
+  if (exact.length || !fuzzy) return exact.slice(0, MAX_MATCHED_TERMS);
+  return terms.filter((term) => containsTerm(text, term, true)).slice(0, MAX_MATCHED_TERMS);
+}
+
+// Two passes, not one: an exact hit anywhere in the list beats a fuzzy hit earlier in it.
+// Searching "1/4 inch BSP" used to be reported as connection "BSPP", because BSPP precedes BSP in
+// the list and is within one edit of it.
 function findTerm(text: string, terms: string[], fuzzy = false): string | null {
-  return terms.find((term) => containsTerm(text, term, fuzzy)) || null;
+  const exact = terms.find((term) => containsTerm(text, term));
+  if (exact || !fuzzy) return exact || null;
+  return terms.find((term) => containsTerm(text, term, true)) || null;
 }
 
 function canonicalMaterial(value: string | null, fuzzy = false): string | null {
   if (!value) return null;
   const normalized = normalizeText(value).replace(/^MOC\s*/, "");
-  const known = findTerm(normalized, KNOWN_MATERIALS, fuzzy);
+  const known = findTerm(`${normalized} ${expandAbbreviations(normalized)}`, KNOWN_MATERIALS, fuzzy);
   return known || normalized.slice(0, 80);
 }
 
-function parseSize(text: string): Pick<MaterialAttributes, "sizeMm" | "sizeDisplay"> {
-  const dn = text.match(/\bDN\s*[-:]?\s*(\d+(?:\.\d+)?)\b/i);
-  if (dn) return { sizeMm: Number(dn[1]), sizeDisplay: `DN${displayNumber(Number(dn[1]))}` };
-  const nb = text.match(/\b(\d+(?:\.\d+)?)\s*NB\b/i) || text.match(/\bNB\s*[-:]?\s*(\d+(?:\.\d+)?)\b/i);
-  if (nb) return { sizeMm: Number(nb[1]), sizeDisplay: `DN${displayNumber(Number(nb[1]))}` };
-  const labeled = text.match(/(?:\bSIZE|CONNECTION SIZE|NOMINAL SIZE)\s*:\s*(\d+(?:\.\d+)?)\s*(MM|INCHES|INCH|IN|\")(?:\b|$)/i);
-  const compact = text.match(/\b(\d+(?:\.\d+)?)\s*(MM|INCHES|INCH|IN)\b/i);
-  const match = labeled || compact;
-  if (!match) return { sizeMm: null, sizeDisplay: null };
-  const amount = Number(match[1]);
-  const inches = /IN|"/i.test(match[2]);
-  return {
-    sizeMm: inches ? Number((amount * 25.4).toFixed(2)) : amount,
-    sizeDisplay: `${displayNumber(amount)}${inches ? "IN" : "MM"}`,
-  };
+const MM_PER_INCH = 25.4;
+
+/**
+ * Converts one size expression to millimetres. Fractional inches are the reason this exists: the
+ * previous single regex read "1/4IN" as "4 IN" because "/" is a word boundary, so a quarter-inch
+ * tube was indexed as 101.6 mm instead of 6.35 mm - 25x too large, and indistinguishable from a
+ * genuine 4-inch item. 3,125 of 12,257 rows in a real export contain fractional inch sizes.
+ */
+function toMillimetres(amount: string, unit: string | undefined, fallbackUnit: string | null): { mm: number; unit: string } | null {
+  const mixed = amount.match(/^(\d+)\s*-\s*(\d+)\s*\/\s*(\d+)$/);
+  const fraction = amount.match(/^(\d+)\s*\/\s*(\d+)$/);
+  let value: number;
+  if (mixed) value = Number(mixed[1]) + Number(mixed[2]) / Number(mixed[3]);
+  else if (fraction) value = Number(fraction[1]) / Number(fraction[2]);
+  else value = Number(amount);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const resolved = (unit || fallbackUnit || "MM").toUpperCase();
+  const inches = /^(IN|INCH|INCHES|")$/.test(resolved);
+  return { mm: inches ? Number((value * MM_PER_INCH).toFixed(2)) : Number(value.toFixed(2)), unit: inches ? "IN" : "MM" };
+}
+
+// A single size expression: an optional DN/NB prefix, a decimal, fraction or mixed-fraction amount,
+// and an optional unit. Kept as a source string so it can be reused inside the "A x B" pattern.
+const AMOUNT = String.raw`\d+(?:\s*-\s*\d+\s*\/\s*\d+|\s*\/\s*\d+|\.\d+)?`;
+const UNIT = String.raw`MM|INCHES|INCH|IN|"`;
+const SIZE = String.raw`(?:DN|NB|NPS)?\s*(${AMOUNT})\s*(${UNIT})?`;
+// Deliberately not a word boundary: the catalog glues a size onto the word before it
+// ("HEAVYDUTY16MM"), and that is still a size. Only a preceding digit or decimal point would mean
+// the capture is splitting a larger number in half.
+const UNGLUED = String.raw`(?<![\d.])`;
+
+function displaySize(amount: string, unit: string): string {
+  return `${amount.replace(/\s+/g, "")}${unit}`;
+}
+
+function parseSize(text: string): Pick<MaterialAttributes, "sizeMm" | "sizeDisplay" | "sizeMm2"> {
+  const empty = { sizeMm: null, sizeDisplay: null, sizeMm2: null };
+  // Reducing fittings state both bores ("40x20", "3\" X 2\"", "25MMX20MM"). Read them together so
+  // the larger bore becomes the primary size instead of whichever number the scan happened to hit.
+  const pair = text.match(new RegExp(`${SIZE}\\s*[X×]\\s*${SIZE}`, "i"));
+  if (pair) {
+    const first = toMillimetres(pair[1], pair[2], pair[4] || null);
+    const second = toMillimetres(pair[3], pair[4], pair[2] || null);
+    if (first && second) {
+      return { sizeMm: first.mm, sizeDisplay: displaySize(pair[1], first.unit), sizeMm2: second.mm };
+    }
+  }
+  // A labelled size is authoritative; an unlabelled number may be a wall thickness or a length.
+  const labelled = text.match(new RegExp(String.raw`(?:NOMINAL PIPE SIZE|NOMINAL SIZE|CONNECTION SIZE|OUTSIDE DIAMETER|\bSIZE|\bOD|\bDIA(?:METER)?)\s*:?\s*${SIZE}`, "i"));
+  const dn = text.match(new RegExp(String.raw`\b(?:DN|NB|NPS)\s*[-:]?\s*(${AMOUNT})\s*(${UNIT})?`, "i"));
+  const trailingNb = text.match(new RegExp(String.raw`${UNGLUED}(${AMOUNT})\s*NB\b`, "i"));
+  const inches = text.match(new RegExp(String.raw`${UNGLUED}(${AMOUNT})\s*(INCHES|INCH|IN|")(?:\b|$)`, "i"));
+  const millimetres = text.match(new RegExp(String.raw`${UNGLUED}(${AMOUNT})\s*(MM)\b`, "i"));
+  for (const [match, fallback] of [[labelled, null], [dn, "MM"], [trailingNb, "MM"], [inches, "IN"], [millimetres, "MM"]] as const) {
+    if (!match) continue;
+    const size = toMillimetres(match[1], match[2], fallback);
+    if (size) return { sizeMm: size.mm, sizeDisplay: displaySize(match[1], size.unit), sizeMm2: null };
+  }
+  return empty;
 }
 
 const MAX_PLAUSIBLE_PRESSURE_RATING = 2500;
@@ -117,13 +230,38 @@ function parsePressure(text: string): Pick<MaterialAttributes, "pressureBar" | "
   return { pressureBar: null, pressureClass: null };
 }
 
-function inferItemType(text: string, className = "", fuzzy = false): string | null {
-  const source = normalizeText(className);
-  if (containsTerm(source, "VALVE", fuzzy) || source.includes("VALVE")) return "VALVE";
-  const first = source.split(",")[0]?.trim();
-  if (first && first !== "MATERIAL" && first !== "GENERIC") return first;
-  const known = ["VALVE", "SEAT", "GEARBOX", "DAMPER", "CABLE", "BEARING", "MOTOR", "PUMP", "BOLT", "GASKET", "FLANGE", "PIPE", "FITTING", "ACTUATOR"];
-  return known.find((type) => containsTerm(text, type, fuzzy)) || null;
+// Schedule is the wall-thickness class of a pipe or fitting and is quoted constantly in this
+// catalog (2,597 rows). Two items that agree on bore but not on schedule are not interchangeable.
+function parseSchedule(text: string): string | null {
+  const match = text.match(/\bSCH(?:EDULE)?(?:\s*RATING)?\s*[-:]?\s*(XXS|XS|STD|\d{1,3}\s*S?)\b/i);
+  if (!match) return null;
+  return `SCH ${match[1].replace(/\s+/g, "").toUpperCase()}`;
+}
+
+function parseAngle(text: string): number | null {
+  // Same glued-digit problem as sizes: "ELBOW BW DN200SCH80CS45DEG" states a 45 degree bend.
+  const match = text.match(new RegExp(String.raw`${UNGLUED}(\d{1,3}(?:\.\d+)?)\s*(?:DEG(?:REE)?S?|°)`, "i"));
+  if (!match) return null;
+  const angle = Number(match[1]);
+  return angle > 0 && angle <= 360 ? angle : null;
+}
+
+function parseWallThickness(lines: string[], text: string): number | null {
+  const labelled = extractLabeled(lines, ["WALL THICKNESS", "THICKNESS", "THK"]);
+  const source = labelled || text.match(/\b(?:WALL\s*THICKNESS|THK)\s*[-:]?\s*(\d+(?:\.\d+)?\s*(?:MM|IN)?)/i)?.[1] || null;
+  if (!source) return null;
+  const match = source.match(new RegExp(`^${SIZE}`, "i"));
+  if (!match) return null;
+  return toMillimetres(match[1], match[2], "MM")?.mm ?? null;
+}
+
+// The exact scan is positional and tier-aware, which is what makes "ELBW PIPE" an ELBOW rather
+// than a PIPE. Typo tolerance cannot preserve that ordering, so it is only a fallback for when the
+// exact scan finds nothing at all - and ITEM_TYPE_LIST is already ordered specific-first.
+function resolveItemType(value: string, className: string, termText: string, fuzzy: boolean): string | null {
+  const exact = deriveItemType(value, "", className);
+  if (exact || !fuzzy) return exact;
+  return ITEM_TYPE_LIST.find((type) => containsTerm(termText, type, true)) || null;
 }
 
 /**
@@ -132,23 +270,33 @@ function inferItemType(text: string, className = "", fuzzy = false): string | nu
  * parsed with this off so large-file imports stay fast.
  */
 export function parseAttributes(value: string, className = "", subtypeTerms: string[] = FALLBACK_SUBTYPES, fuzzy = false): MaterialAttributes {
-  const text = normalizeText(`${className} ${value}`);
+  const lines = segments(`${className}\n${value}`);
+  const text = repairText(normalizeText(`${className} ${value}`));
+  // Terms are looked for in the original wording *and* its expansion, so "CS" is recognized as
+  // carbon steel while "SS 316L" keeps its grade, and a query typed either way still matches.
+  const termText = `${text} ${expandAbbreviations(text)}`;
   const orderedSubtypeTerms = [...subtypeTerms].sort((left, right) => right.length - left.length);
+  const subtypes = findTerms(termText, orderedSubtypeTerms, fuzzy);
   const size = parseSize(text);
   const pressure = parsePressure(text);
-  const standards = [...new Set(Array.from(text.matchAll(/\b(?:EN\s*\d+(?:[-.]\d+)*|API\s*\d+(?:[-.]\d+)*|DIN\s*\d+(?:[-.]\d+)*|(?:ANSI|ASME)\s*[A-Z]*\s*\d+(?:\.\d+)*)\b/g), (match) => match[0].replace(/\s+/g, " ")))];
-  const materials = [...new Set(KNOWN_MATERIALS.filter((material) => containsTerm(text, material, fuzzy)))];
+  const standards = [...new Set(Array.from(text.matchAll(/\b(?:EN\s*\d+(?:[-.]\d+)*|API\s*\d+(?:[-.]\d+)*|DIN\s*\d+(?:[-.]\d+)*|ISO\s*\d+(?:[-.]\d+)*|ASTM\s*-?\s*[A-Z]?-?\s*\d+(?:[-.]\d+)*|IS\s*\d{3,}|(?:ANSI|ASME)\s*[A-Z]*\s*\d+(?:\.\d+)*)\b/g), (match) => match[0].replace(/\s+/g, " ")))];
+  const materials = [...new Set(KNOWN_MATERIALS.filter((material) => containsTerm(termText, material, fuzzy)))];
   const faceMatch = text.match(/(?:FACE[ -]?TO[ -]?FACE|\bFF)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*MM\b/i);
-  const bodyMaterial = canonicalMaterial(extractLabeled(text, ["BODY MATERIAL", "BODY MOC", "BODY"]), fuzzy);
-  const discMaterial = canonicalMaterial(extractLabeled(text, ["DISC MATERIAL", "DISC MOC", "DISC"]), fuzzy);
-  const stemMaterial = canonicalMaterial(extractLabeled(text, ["STEM MATERIAL", "STEM MOC", "STEM"]), fuzzy);
-  const seatMaterial = canonicalMaterial(extractLabeled(text, ["SEAT MATERIAL", "SEAT MOC", "SEAT", "LINER MATERIAL", "SEAL MATERIAL"]), fuzzy);
+  const bodyMaterial = canonicalMaterial(extractLabeled(lines, ["BODY MATERIAL", "BODY MOC", "BODY"]), fuzzy);
+  const discMaterial = canonicalMaterial(extractLabeled(lines, ["DISC MATERIAL", "DISC MOC", "DISC"]), fuzzy);
+  const stemMaterial = canonicalMaterial(extractLabeled(lines, ["STEM MATERIAL", "STEM MOC", "STEM"]), fuzzy);
+  const seatMaterial = canonicalMaterial(extractLabeled(lines, ["SEAT MATERIAL", "SEAT MOC", "SEAT", "LINER MATERIAL", "SEAL MATERIAL"]), fuzzy);
   return {
-    itemType: inferItemType(text, className, fuzzy),
-    subtype: findTerm(text, orderedSubtypeTerms, fuzzy) || (containsTerm(text, "BTRFLY") ? "BUTTERFLY" : null),
+    itemType: resolveItemType(value, className, termText, fuzzy),
+    subtype: subtypes[0] ?? null,
+    subtypes,
     ...size,
+    schedule: parseSchedule(text),
+    wallThicknessMm: parseWallThickness(lines, text),
+    angleDeg: parseAngle(text),
+    make: extractLabeled(lines, ["MAKE", "BRAND", "MANUFACTURER"])?.slice(0, 60) || null,
     ...pressure,
-    connection: findTerm(text, CONNECTIONS, fuzzy),
+    connection: findTerm(termText, CONNECTIONS, fuzzy),
     faceToFaceMm: faceMatch ? Number(faceMatch[1]) : null,
     bodyMaterial,
     discMaterial,
@@ -156,8 +304,17 @@ export function parseAttributes(value: string, className = "", subtypeTerms: str
     seatMaterial,
     materials: [...new Set([bodyMaterial, discMaterial, stemMaterial, seatMaterial, ...materials].filter((item): item is string => Boolean(item)))],
     standards,
-    actuation: findTerm(text, ACTUATIONS, fuzzy),
+    actuation: findTerm(termText, ACTUATIONS, fuzzy),
   };
+}
+
+// "Blocked for Procurement" items still exist and are still legitimate answers to "what is the code
+// for this part?", so they stay searchable and are ranked last rather than hidden. Only codes that
+// were never issued or were withdrawn are excluded outright.
+const BLOCKED_STATUS_PATTERN = /BLOCKED/;
+
+export function isBlockedStatus(status: string): boolean {
+  return BLOCKED_STATUS_PATTERN.test(normalizeText(status));
 }
 
 export function isActiveStatus(status: string): boolean {
@@ -165,31 +322,8 @@ export function isActiveStatus(status: string): boolean {
   return !normalized.includes("DELETED") && !normalized.includes("RFD STAGED") && !normalized.includes("RFUD STAGED");
 }
 
+export { areRelatedItemTypes, deriveItemType, deriveSubtypeVocabulary, buildSearchText } from "./vocabulary.ts";
+
 export function materialSearchText(className: string, shortDescription: string, longDescription: string): string {
   return normalizeText(`${className} ${shortDescription} ${longDescription}`);
-}
-
-// class_name follows a "TYPE, SUBTYPE[, MODIFIER]" comma convention (e.g. "VALVE, BUTTERFLY",
-// "BALL, VALVE", "VALVE, REGULATING, FLUID PRESSURE"). Splitting on commas and discarding the
-// generic/structural segments yields the subtype vocabulary directly from whatever data is at
-// hand, instead of a hand-maintained word list that goes stale as new item types appear.
-// Connection/actuation vocabulary is excluded too: "FLANGE" is both a standalone catalog item
-// (flange fittings) and a recognized connection type for valves/pumps, and letting the same word
-// serve as both a subtype and a connection term causes cross-category false matches.
-const SUBTYPE_VOCABULARY_STOPWORDS = new Set([
-  "VALVE", "VALVES", "MATERIAL", "MATERIALS", "GENERIC", "ASSEMBLY", "ASSEMBLIES", "KIT", "KITS",
-  "REPAIR", "SPARE", "SPARES", "BODY", "SEAT", "ACTUATOR", "POSITIONER", "SKIRT",
-  "AND", "FOR", "TYPE", "N A", "MISC", "MISCELLANEOUS", "OTHER", "OTHERS",
-  ...CONNECTIONS, ...ACTUATIONS,
-]);
-
-export function deriveSubtypeVocabulary(classNames: string[]): string[] {
-  const terms = new Set(FALLBACK_SUBTYPES);
-  for (const className of classNames) {
-    for (const part of (className || "").toUpperCase().split(",")) {
-      const term = part.trim();
-      if (term.length >= 3 && term.length <= 24 && /^[A-Z][A-Z /-]*[A-Z]$/.test(term) && !SUBTYPE_VOCABULARY_STOPWORDS.has(term)) terms.add(term);
-    }
-  }
-  return [...terms];
 }

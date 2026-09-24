@@ -2,9 +2,19 @@ export type MatchState = "exact" | "compatible" | "mismatch" | "missing";
 
 export interface MaterialAttributes {
   itemType: string | null;
+  /** Most specific single subtype, for display. */
   subtype: string | null;
+  /** Every subtype modifier found. A description states several ("SEAMLESS", "PVC COATED"), and
+   *  which one is "the" subtype is arbitrary - so agreement is scored as set overlap. */
+  subtypes: string[];
   sizeMm: number | null;
   sizeDisplay: string | null;
+  /** Second bore of a reducing fitting ("REDUCER 40x20", "TEE 3\" X 2\""). */
+  sizeMm2: number | null;
+  schedule: string | null;
+  wallThicknessMm: number | null;
+  angleDeg: number | null;
+  make: string | null;
   pressureBar: number | null;
   pressureClass: string | null;
   connection: string | null;
@@ -23,6 +33,9 @@ export interface MaterialImportRow {
   sapNo: string;
   plant: string;
   className: string;
+  /** Source commodity group code and its label, kept separate from the derived search family. */
+  materialGroup: string;
+  materialGroupDescription: string;
   shortDescription: string;
   longDescription: string;
   uom: string;
@@ -38,8 +51,12 @@ export interface MaterialImportRow {
 
 export interface MaterialCandidate extends MaterialImportRow {
   id: string;
+  /** Every plant carrying this material number, collapsed into the single candidate row. */
+  plants: string[];
   lexicalScore: number;
   fuzzyScore: number;
+  /** True when the query names this material's code, or repeats its description verbatim. */
+  exactMatch: boolean;
   embedding: number[] | null;
 }
 
@@ -58,11 +75,15 @@ export interface MaterialMatch {
   corporateNo: string;
   sapNo: string;
   plant: string;
+  plants: string[];
   className: string;
   shortDescription: string;
   longDescription: string;
   status: string;
   statusDescription: string;
+  /** Blocked for procurement: still shown, ranked last, and badged in the UI. */
+  blocked: boolean;
+  exactMatch: boolean;
   confidence: number;
   parametricScore: number;
   semanticScore: number;

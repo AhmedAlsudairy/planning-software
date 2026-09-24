@@ -6,7 +6,7 @@ Engineering-aware SAP material matching built with Next.js, Neon Postgres, and t
 
 - Imports `.xlsx` and `.csv` material masters up to 100,000 rows
 - Replaces the current searchable dataset atomically after a complete successful import
-- Maps the Jindal/iDXP columns used by the supplied 20,000-row workbook and preserves extra columns in `raw_data`
+- Accepts either export layout - the Jindal/iDXP columns and the SAP plant MM export (`Material Number`, `Material Description`, `Material Text`, ...) - by resolving headers to logical fields, and preserves extra columns in `raw_data`
 - Excludes deleted and deletion-staged records by default
 - Extracts item class, subtype, DN/size, pressure, connection, face-to-face, MOC, standards, and actuation
 - Combines deterministic weighted engineering scoring with Gemini semantic embeddings
@@ -54,19 +54,25 @@ Each successful upload becomes the single active dataset:
 4. Reused embeddings are carried over for records whose descriptions did not change.
 5. Concurrent imports are rejected with HTTP 409 through a database lock, so two uploads can never delete each other's rows.
 
-Recognized core columns update the searchable fields, and any additional spreadsheet columns are retained in `raw_data`.
+Recognized core columns update the searchable fields, and any additional spreadsheet columns are retained in `raw_data`. Headers are resolved by meaning rather than exact name, so both the iDXP layout and the SAP plant export import without configuration; a file is rejected only when it carries no material code column or no description column, and the error names which. An export whose class column holds a single constant value (the SAP export labels all 12,257 rows `PIPE FITT & NOZZLES`) has its search family derived from the description instead.
 
 ## Matching pipeline
 
-1. Parse the free-text query with deterministic engineering rules.
+1. Parse the free-text query with deterministic engineering rules, expanding the catalog's SAP abbreviations (`FLNG` to `FLANGE`) so either spelling matches.
 2. Use Gemini structured output to fill only explicitly supplied attributes missed by the rules.
-3. Filter inactive records and restrict candidates by material class.
-4. Retrieve up to 60 candidates using stored engineering attributes plus PostgreSQL full-text and trigram similarity.
+3. Retrieve candidates through four independent arms that are unioned before scoring: exact code, full-text (OR semantics), trigram word similarity, and stored engineering attributes. One arm finding nothing cannot empty the result set.
+4. Collapse each material to a single row carrying every plant that stocks it.
 5. Shortlist candidates with the same weighted engineering scoring and penalties used for final ranking.
 6. Generate and cache 768-dimensional `gemini-embedding-2` vectors for the shortlist only.
-7. Rank using 70% parametric and 30% semantic similarity, then penalize conflicting size and connection values.
+7. Rank using 70% parametric and 30% semantic similarity, then penalize conflicting size, second bore, angle, schedule and connection values, and scale by item-type family agreement.
 
-Gemini failures fall back to deterministic parsing and lexical similarity. Numeric engineering conflicts are never overridden by semantic similarity.
+An item type from a different family is penalized rather than filtered out, so a genuine cross-family match still surfaces below the right family. Gemini failures fall back to deterministic parsing and lexical similarity. Numeric engineering conflicts are never overridden by semantic similarity.
+
+## Retrieval quality
+
+`npm run eval-search` samples materials from the promoted upload, paraphrases each one's own description into a query, and reports recall@1/@5/@10 and MRR. It fails if any sampled query returns no candidates. It needs `DATABASE_URL` and is excluded from `npm run verify`.
+
+See `docs/ux-guidelines.md` for the rules the result list follows.
 
 ## Scoring behavior
 

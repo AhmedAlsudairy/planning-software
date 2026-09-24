@@ -2,6 +2,7 @@ import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import type { MaterialAttributes, MaterialCandidate } from "@/types/material";
 import { saveEmbedding } from "@/lib/db";
+import { expandAbbreviations } from "@/lib/vocabulary";
 
 const extractionSchema = {
   type: "object",
@@ -10,6 +11,11 @@ const extractionSchema = {
     subtype: { type: ["string", "null"] },
     sizeMm: { type: ["number", "null"] },
     sizeDisplay: { type: ["string", "null"] },
+    sizeMm2: { type: ["number", "null"] },
+    schedule: { type: ["string", "null"] },
+    wallThicknessMm: { type: ["number", "null"] },
+    angleDeg: { type: ["number", "null"] },
+    make: { type: ["string", "null"] },
     pressureBar: { type: ["number", "null"] },
     pressureClass: { type: ["string", "null"] },
     connection: { type: ["string", "null"] },
@@ -22,7 +28,7 @@ const extractionSchema = {
     standards: { type: "array", items: { type: "string" } },
     actuation: { type: ["string", "null"] },
   },
-  required: ["itemType", "subtype", "sizeMm", "sizeDisplay", "pressureBar", "pressureClass", "connection", "faceToFaceMm", "bodyMaterial", "discMaterial", "stemMaterial", "seatMaterial", "materials", "standards", "actuation"],
+  required: ["itemType", "subtype", "sizeMm", "sizeDisplay", "sizeMm2", "schedule", "wallThicknessMm", "angleDeg", "make", "pressureBar", "pressureClass", "connection", "faceToFaceMm", "bodyMaterial", "discMaterial", "stemMaterial", "seatMaterial", "materials", "standards", "actuation"],
   additionalProperties: false,
 };
 
@@ -31,6 +37,11 @@ const extractedAttributesSchema = z.object({
   subtype: z.string().nullable(),
   sizeMm: z.number().nullable(),
   sizeDisplay: z.string().nullable(),
+  sizeMm2: z.number().nullable(),
+  schedule: z.string().nullable(),
+  wallThicknessMm: z.number().nullable(),
+  angleDeg: z.number().nullable(),
+  make: z.string().nullable(),
   pressureBar: z.number().nullable(),
   pressureClass: z.string().nullable(),
   connection: z.string().nullable(),
@@ -57,7 +68,7 @@ function clean(value: string | null): string | null {
 export async function extractQueryAttributes(query: string, deterministic: MaterialAttributes): Promise<MaterialAttributes> {
   const response = await client().interactions.create({
     model: process.env.GEMINI_MODEL || "gemini-3.8-flash",
-    input: `Extract only engineering attributes explicitly present in this material specification. Convert inch sizes to millimetres. Do not infer missing values or claim pressure-class equivalence. Specification: ${query}`,
+    input: `Extract only engineering attributes explicitly present in this material specification. Convert inch sizes to millimetres, reading fractional inches exactly ("1/4 IN" is 6.35 mm, not 101.6 mm). For a reducing fitting put the larger bore in sizeMm and the smaller in sizeMm2. Do not infer missing values or claim pressure-class equivalence. Specification: ${query}`,
     response_format: { type: "text", mime_type: "application/json", schema: extractionSchema },
     store: false,
   }, { timeout: 8_000, maxRetries: 0 });
@@ -66,8 +77,15 @@ export async function extractQueryAttributes(query: string, deterministic: Mater
   return {
     itemType: deterministic.itemType || clean(extracted.itemType),
     subtype: deterministic.subtype || clean(extracted.subtype),
+    // Gemini returns one subtype; it joins the deterministic set rather than replacing it.
+    subtypes: [...new Set([...deterministic.subtypes, clean(extracted.subtype)].filter((value): value is string => Boolean(value)))],
     sizeMm: deterministic.sizeMm ?? extracted.sizeMm,
     sizeDisplay: deterministic.sizeDisplay || clean(extracted.sizeDisplay),
+    sizeMm2: deterministic.sizeMm2 ?? extracted.sizeMm2,
+    schedule: deterministic.schedule || clean(extracted.schedule),
+    wallThicknessMm: deterministic.wallThicknessMm ?? extracted.wallThicknessMm,
+    angleDeg: deterministic.angleDeg ?? extracted.angleDeg,
+    make: deterministic.make || clean(extracted.make),
     pressureBar: deterministic.pressureBar ?? extracted.pressureBar,
     pressureClass: deterministic.pressureClass || clean(extracted.pressureClass),
     connection: deterministic.connection || clean(extracted.connection),
@@ -98,7 +116,10 @@ export function embedSearchQuery(query: string): Promise<number[]> {
 }
 
 function candidateDocument(candidate: MaterialCandidate): string {
-  return `title: ${candidate.shortDescription || candidate.className} | text: ${candidate.className}; ${candidate.longDescription}`;
+  // The abbreviated short text alone embeds poorly against a plain-English query, so the expansion
+  // is included alongside it ("FLNG PIPE" plus "FLANGE PIPE").
+  const title = candidate.shortDescription || candidate.className;
+  return `title: ${title} | text: ${expandAbbreviations(title)}; ${candidate.className}; ${candidate.longDescription}`;
 }
 
 export async function hydrateCandidateEmbeddings(candidates: MaterialCandidate[]): Promise<void> {
