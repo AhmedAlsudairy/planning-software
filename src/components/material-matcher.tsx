@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowRight, BadgeCheck, BarChart3, Ban, Check, ChevronDown, Clipboard, CloudUpload, Database, Download, FileSpreadsheet, Factory, LoaderCircle, Printer, Search, ShieldCheck, Sparkles, TriangleAlert, X } from "lucide-react";
+import { AlertCircle, ArrowRight, BadgeCheck, BarChart3, Ban, Check, ChevronDown, Clipboard, CloudUpload, Database, Download, FileSpreadsheet, Factory, LoaderCircle, Printer, Search, Sparkles, TriangleAlert, X } from "lucide-react";
 import type { MaterialAttributes, MaterialMatch, SearchResponse, UploadSummary } from "@/types/material";
 
 interface Stats {
@@ -237,7 +237,7 @@ export default function MaterialMatcher() {
       </header>
 
       <section className="bg-[#0e2823] px-5 pb-28 pt-14 text-white print:hidden lg:px-8">
-        <div className="mx-auto max-w-7xl"><div className="max-w-3xl"><div className="mb-5 inline-flex items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-emerald-300"><ShieldCheck size={14} />Engineering-aware matching</div><h1 className="text-4xl font-bold leading-tight tracking-[-0.04em] sm:text-5xl">SAP code finder</h1><p className="mt-5 max-w-2xl text-base leading-7 text-slate-300">Upload your SAP material master, describe the target specification, and compare ranked candidates across dimensions, pressure, connection, materials, standards, and meaning.</p></div></div>
+        <div className="mx-auto max-w-7xl"><div className="max-w-3xl"><h1 className="text-4xl font-bold leading-tight tracking-[-0.04em] sm:text-5xl">SAP code finder</h1><p className="mt-5 max-w-2xl text-base leading-7 text-slate-300">Upload your SAP material master, describe the target specification, and compare ranked candidates across dimensions, pressure, connection, materials, standards, and meaning.</p></div></div>
       </section>
 
       <div className="mx-auto -mt-16 max-w-7xl space-y-6 px-5 pb-16 print:mt-0 print:px-0 lg:px-8">
