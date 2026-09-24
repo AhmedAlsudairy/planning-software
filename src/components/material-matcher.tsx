@@ -238,7 +238,7 @@ export default function MaterialMatcher() {
       </header>
 
       <section className="bg-[#0e2823] px-5 pb-28 pt-14 text-white print:hidden lg:px-8">
-        <div className="mx-auto max-w-7xl"><div className="max-w-3xl"><div className="mb-5 inline-flex items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-emerald-300"><ShieldCheck size={14} />Engineering-aware matching</div><h1 className="text-4xl font-bold leading-tight tracking-[-0.04em] sm:text-5xl">Find the right material code.<br/><span className="text-emerald-300">With evidence, not guesses.</span></h1><p className="mt-5 max-w-2xl text-base leading-7 text-slate-300">Upload your SAP material master, describe the target specification, and compare ranked candidates across dimensions, pressure, connection, materials, standards, and meaning.</p></div></div>
+        <div className="mx-auto max-w-7xl"><div className="max-w-3xl"><div className="mb-5 inline-flex items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-emerald-300"><ShieldCheck size={14} />Engineering-aware matching</div><h1 className="text-4xl font-bold leading-tight tracking-[-0.04em] sm:text-5xl">SAP code finder</h1><p className="mt-5 max-w-2xl text-base leading-7 text-slate-300">Upload your SAP material master, describe the target specification, and compare ranked candidates across dimensions, pressure, connection, materials, standards, and meaning.</p></div></div>
       </section>
 
       <div className="mx-auto -mt-16 max-w-7xl space-y-6 px-5 pb-16 print:mt-0 print:px-0 lg:px-8">
@@ -251,6 +251,7 @@ export default function MaterialMatcher() {
             </div>
             {file && <div className="mt-4 flex items-center gap-3 rounded-xl bg-slate-50 p-3"><FileSpreadsheet className="text-emerald-700" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold">{file.name}</p><p className="text-xs text-slate-400">{(file.size / 1024 / 1024).toFixed(2)} MB</p></div><button onClick={(event) => { event.stopPropagation(); setFile(null); setUploadSummary(null); }} className="rounded-lg p-2 hover:bg-slate-200"><X size={16} /></button></div>}
             <button onClick={upload} disabled={!file || uploading || !stats.configured} className="mt-4 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-slate-900 text-sm font-bold text-white transition hover:bg-emerald-900 disabled:cursor-not-allowed disabled:opacity-40">{uploading ? <LoaderCircle className="animate-spin" size={17} /> : <CloudUpload size={17} />}{uploading ? "Parsing and importing…" : "Import material master"}</button>
+            <p className="mt-3 rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-500"><strong className="text-slate-700">Note:</strong> To import the list, execute the custom SAP transaction <strong className="text-slate-700">ZMM055</strong> and apply layout variant <strong className="text-slate-700">/ISHAQ NEW</strong>.</p>
             {uploadSummary && <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900"><div className="flex items-center gap-2 font-bold"><Check size={17} />Import complete</div><div className="mt-2 grid grid-cols-3 gap-2 text-center"><div><strong className="block">{formatNumber(uploadSummary.importedRows)}</strong><span className="text-xs">Rows</span></div><div><strong className="block">{formatNumber(uploadSummary.uniqueMaterials)}</strong><span className="text-xs">Unique</span></div><div><strong className="block">{formatNumber(uploadSummary.activeRows)}</strong><span className="text-xs">Active</span></div></div></div>}
           </div>
 
@@ -262,6 +263,7 @@ export default function MaterialMatcher() {
             <div className="mt-4 flex items-center gap-3 border-t border-slate-100 pt-4">
               <input ref={bulkSearchInputRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={(event) => bulkSearchFromFile(event.target.files?.[0])} />
               <button onClick={() => bulkSearchInputRef.current?.click()} disabled={searching || bulkSearching || !stats.materials} className="flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 transition hover:border-emerald-400 hover:text-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{bulkSearching ? <LoaderCircle className="animate-spin" size={15} /> : <FileSpreadsheet size={15} />}{bulkSearching ? "Searching bulk list…" : "Or search a list from Excel/CSV (up to 200 items)"}</button>
+              <a href="/search-list-sample.xlsx" download className="flex h-10 items-center gap-2 rounded-xl px-3 text-xs font-bold text-emerald-700 hover:text-emerald-900"><Download size={15} />Empty sample</a>
             </div>
           </div>
         </section>
