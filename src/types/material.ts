@@ -9,6 +9,8 @@ export interface MaterialAttributes {
   subtypes: string[];
   sizeMm: number | null;
   sizeDisplay: string | null;
+  /** Part-number designation found in a search query; set at query time only. */
+  modelNumber?: string | null;
   /** Second bore of a reducing fitting ("REDUCER 40x20", "TEE 3\" X 2\""). */
   sizeMm2: number | null;
   schedule: string | null;
