@@ -14,12 +14,16 @@ interface Stats {
 }
 
 
+// Keep at or below MAX_EXPORT_QUERIES in src/app/api/export/route.ts.
+const EXPORT_QUERIES_PER_FILE = 50;
+
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-IN").format(value);
 }
 
 function AttributePills({ attributes }: { attributes: MaterialAttributes }) {
   const values = [
+    attributes.modelNumber ? `Part no. ${attributes.modelNumber}` : null,
     attributes.itemType,
     ...(attributes.subtypes?.length ? attributes.subtypes : [attributes.subtype]),
     attributes.sizeDisplay,
@@ -216,15 +220,21 @@ export default function MaterialMatcher() {
 
   const exportResults = async () => {
     if (!results?.length) return;
-    const payload = results.length === 1 ? { query: results[0].query, matches: results[0].matches } : { results: results.map((result) => ({ query: result.query, matches: result.matches })) };
-    const response = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    if (!response.ok) return setError("Export failed");
-    const url = URL.createObjectURL(await response.blob());
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `material-matches-${new Date().toISOString().slice(0, 10)}.xlsx`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    // Large bulk searches are split into several files so each request stays under the host's body limit.
+    const parts: (typeof results)[] = [];
+    for (let start = 0; start < results.length; start += EXPORT_QUERIES_PER_FILE) parts.push(results.slice(start, start + EXPORT_QUERIES_PER_FILE));
+    const date = new Date().toISOString().slice(0, 10);
+    for (const [index, part] of parts.entries()) {
+      const payload = part.length === 1 && parts.length === 1 ? { query: part[0].query, matches: part[0].matches } : { results: part.map((result) => ({ query: result.query, matches: result.matches })) };
+      const response = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      if (!response.ok) return setError(parts.length > 1 ? `Export failed on part ${index + 1} of ${parts.length}` : "Export failed");
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = parts.length > 1 ? `material-matches-${date}-part-${index + 1}-of-${parts.length}.xlsx` : `material-matches-${date}.xlsx`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    }
   };
 
   return (

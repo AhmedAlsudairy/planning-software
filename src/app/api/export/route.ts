@@ -3,6 +3,9 @@ import { z } from "zod";
 
 export const runtime = "nodejs";
 
+// Must stay >= MAX_SEARCH_ITEMS in src/lib/spreadsheet.ts, or a full bulk upload cannot be exported.
+const MAX_EXPORT_QUERIES = 200;
+
 const comparisonSchema = z.object({ label: z.string(), query: z.string(), candidate: z.string(), state: z.string() });
 const matchSchema = z.object({
   rank: z.number(),
@@ -24,7 +27,7 @@ const matchSchema = z.object({
 });
 const bodySchema = z.union([
   z.object({ query: z.string(), matches: z.array(matchSchema).max(10) }),
-  z.object({ results: z.array(z.object({ query: z.string(), matches: z.array(matchSchema).max(10) })).min(1).max(50) }),
+  z.object({ results: z.array(z.object({ query: z.string(), matches: z.array(matchSchema).max(10) })).min(1).max(MAX_EXPORT_QUERIES) }),
 ]);
 
 export async function POST(request: Request) {
@@ -90,7 +93,8 @@ export async function POST(request: Request) {
         "Content-Disposition": `attachment; filename="material-matches-${new Date().toISOString().slice(0, 10)}.xlsx"`,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof z.ZodError) console.error("Export validation failed", error.issues.slice(0, 5));
     return Response.json({ error: "The results could not be exported" }, { status: 400 });
   }
 }
