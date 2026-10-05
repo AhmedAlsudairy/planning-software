@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowRight, BadgeCheck, BarChart3, Ban, Check, ChevronDown, Clipboard, CloudUpload, Database, Download, FileSpreadsheet, Factory, LoaderCircle, Printer, Search, ShieldCheck, Sparkles, TriangleAlert, X } from "lucide-react";
+import { AlertCircle, ArrowRight, BadgeCheck, BarChart3, Ban, Check, ChevronDown, Clipboard, CloudUpload, Database, Download, FileSpreadsheet, Factory, LoaderCircle, Printer, Search, Sparkles, TriangleAlert, X } from "lucide-react";
 import type { MaterialAttributes, MaterialMatch, SearchResponse, UploadSummary } from "@/types/material";
 
 interface Stats {
@@ -14,12 +14,16 @@ interface Stats {
 }
 
 
+// Keep at or below MAX_EXPORT_QUERIES in src/app/api/export/route.ts.
+const EXPORT_QUERIES_PER_FILE = 50;
+
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-IN").format(value);
 }
 
 function AttributePills({ attributes }: { attributes: MaterialAttributes }) {
   const values = [
+    attributes.modelNumber ? `Part no. ${attributes.modelNumber}` : null,
     attributes.itemType,
     ...(attributes.subtypes?.length ? attributes.subtypes : [attributes.subtype]),
     attributes.sizeDisplay,
@@ -216,15 +220,21 @@ export default function MaterialMatcher() {
 
   const exportResults = async () => {
     if (!results?.length) return;
-    const payload = results.length === 1 ? { query: results[0].query, matches: results[0].matches } : { results: results.map((result) => ({ query: result.query, matches: result.matches })) };
-    const response = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    if (!response.ok) return setError("Export failed");
-    const url = URL.createObjectURL(await response.blob());
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `material-matches-${new Date().toISOString().slice(0, 10)}.xlsx`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    // Large bulk searches are split into several files so each request stays under the host's body limit.
+    const parts: (typeof results)[] = [];
+    for (let start = 0; start < results.length; start += EXPORT_QUERIES_PER_FILE) parts.push(results.slice(start, start + EXPORT_QUERIES_PER_FILE));
+    const date = new Date().toISOString().slice(0, 10);
+    for (const [index, part] of parts.entries()) {
+      const payload = part.length === 1 && parts.length === 1 ? { query: part[0].query, matches: part[0].matches } : { results: part.map((result) => ({ query: result.query, matches: result.matches })) };
+      const response = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      if (!response.ok) return setError(parts.length > 1 ? `Export failed on part ${index + 1} of ${parts.length}` : "Export failed");
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = parts.length > 1 ? `material-matches-${date}-part-${index + 1}-of-${parts.length}.xlsx` : `material-matches-${date}.xlsx`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    }
   };
 
   return (
@@ -237,7 +247,7 @@ export default function MaterialMatcher() {
       </header>
 
       <section className="bg-[#0e2823] px-5 pb-28 pt-14 text-white print:hidden lg:px-8">
-        <div className="mx-auto max-w-7xl"><div className="max-w-3xl"><div className="mb-5 inline-flex items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-emerald-300"><ShieldCheck size={14} />Engineering-aware matching</div><h1 className="text-4xl font-bold leading-tight tracking-[-0.04em] sm:text-5xl">SAP code finder</h1><p className="mt-5 max-w-2xl text-base leading-7 text-slate-300">Upload your SAP material master, describe the target specification, and compare ranked candidates across dimensions, pressure, connection, materials, standards, and meaning.</p></div></div>
+        <div className="mx-auto max-w-7xl"><div className="max-w-3xl"><h1 className="text-4xl font-bold leading-tight tracking-[-0.04em] sm:text-5xl">SAP code finder</h1><p className="mt-5 max-w-2xl text-base leading-7 text-slate-300">Upload your SAP material master, describe the target specification, and compare ranked candidates across dimensions, pressure, connection, materials, standards, and meaning.</p></div></div>
       </section>
 
       <div className="mx-auto -mt-16 max-w-7xl space-y-6 px-5 pb-16 print:mt-0 print:px-0 lg:px-8">
