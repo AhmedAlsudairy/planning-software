@@ -25,9 +25,10 @@ const matchSchema = z.object({
   comparisons: z.array(comparisonSchema),
   mismatches: z.array(z.string()),
 });
+const groupSchema = z.object({ query: z.string(), didYouMean: z.string().nullish(), matches: z.array(matchSchema).max(10) });
 const bodySchema = z.union([
-  z.object({ query: z.string(), matches: z.array(matchSchema).max(10) }),
-  z.object({ results: z.array(z.object({ query: z.string(), matches: z.array(matchSchema).max(10) })).min(1).max(MAX_EXPORT_QUERIES) }),
+  groupSchema,
+  z.object({ results: z.array(groupSchema).min(1).max(MAX_EXPORT_QUERIES) }),
 ]);
 
 export async function POST(request: Request) {
@@ -39,6 +40,7 @@ export async function POST(request: Request) {
     const summary = workbook.addWorksheet("Matches");
     summary.columns = [
       { header: "Query", key: "sourceQuery", width: 36 },
+      { header: "Did you mean", key: "didYouMean", width: 24 },
       { header: "Rank", key: "rank", width: 8 },
       { header: "Confidence", key: "confidence", width: 14 },
       { header: "Corporate No", key: "corporateNo", width: 20 },
@@ -53,9 +55,13 @@ export async function POST(request: Request) {
       { header: "Semantic Score", key: "semanticScore", width: 18 },
       { header: "Differences", key: "differences", width: 60 },
     ];
-    groups.forEach((group) => group.matches.forEach((match) => summary.addRow({
+    groups.forEach((group) => {
+      // A query with no matches still gets a row, so a typo'd part number is not silently dropped from the file.
+      if (!group.matches.length) summary.addRow({ sourceQuery: group.query, didYouMean: group.didYouMean ?? "", availability: "No match found" });
+      group.matches.forEach((match) => summary.addRow({
       ...match,
       sourceQuery: group.query,
+      didYouMean: group.didYouMean ?? "",
       plants: (match.plants.length ? match.plants : [match.plant]).filter(Boolean).join(", "),
       confidence: `${match.confidence}%`,
       parametricScore: `${match.parametricScore}%`,
@@ -64,7 +70,8 @@ export async function POST(request: Request) {
       availability: match.blocked ? "Blocked for procurement" : "Available",
       matchType: match.exactMatch ? "Exact" : "Similar",
       differences: match.mismatches.join(" | "),
-    })));
+    }));
+    });
     summary.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
     summary.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF15362F" } };
     summary.views = [{ state: "frozen", ySplit: 1 }];
@@ -84,7 +91,7 @@ export async function POST(request: Request) {
     details.views = [{ state: "frozen", ySplit: 1 }];
     if (!("results" in parsed)) {
       summary.insertRow(1, ["Search query", parsed.query]);
-      summary.mergeCells("B1:N1");
+      summary.mergeCells("B1:O1");
     }
     const buffer = await workbook.xlsx.writeBuffer();
     return new Response(buffer as BodyInit, {

@@ -125,6 +125,7 @@ export default function MaterialMatcher() {
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [bulkSearching, setBulkSearching] = useState(false);
+  const [perItem, setPerItem] = useState(5);
   const [results, setResults] = useState<SearchResponse[] | null>(null);
   const [error, setError] = useState("");
 
@@ -184,7 +185,7 @@ export default function MaterialMatcher() {
       const response = await fetch(single ? "/api/search" : "/api/search/batch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(single ? { query: items[0], limit: 5 } : { items, limit: 5 }),
+        body: JSON.stringify(single ? { query: items[0], limit: perItem } : { items, limit: perItem }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Search failed");
@@ -204,7 +205,7 @@ export default function MaterialMatcher() {
     setResults(null);
     const body = new FormData();
     body.append("file", selected);
-    body.append("limit", "5");
+    body.append("limit", String(perItem));
     try {
       const response = await fetch("/api/search/batch-upload", { method: "POST", body });
       const data = await response.json();
@@ -225,7 +226,7 @@ export default function MaterialMatcher() {
     for (let start = 0; start < results.length; start += EXPORT_QUERIES_PER_FILE) parts.push(results.slice(start, start + EXPORT_QUERIES_PER_FILE));
     const date = new Date().toISOString().slice(0, 10);
     for (const [index, part] of parts.entries()) {
-      const payload = part.length === 1 && parts.length === 1 ? { query: part[0].query, matches: part[0].matches } : { results: part.map((result) => ({ query: result.query, matches: result.matches })) };
+      const payload = part.length === 1 && parts.length === 1 ? { query: part[0].query, didYouMean: part[0].didYouMean ?? null, matches: part[0].matches } : { results: part.map((result) => ({ query: result.query, didYouMean: result.didYouMean ?? null, matches: result.matches })) };
       const response = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       if (!response.ok) return setError(parts.length > 1 ? `Export failed on part ${index + 1} of ${parts.length}` : "Export failed");
       const url = URL.createObjectURL(await response.blob());
@@ -270,6 +271,7 @@ export default function MaterialMatcher() {
             <div className="mt-3 flex items-center justify-end gap-4"><span className="text-xs text-slate-400">{query.length}/2,000</span></div>
             <button onClick={() => search()} disabled={searching || bulkSearching || query.trim().length < 3 || !stats.materials} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{searching ? <LoaderCircle className="animate-spin" size={18} /> : <Sparkles size={18} />}{searching ? "Parsing and ranking candidates…" : "Find matching materials"}<ArrowRight size={17} /></button>
             <div className="mt-4 flex items-center gap-3 border-t border-slate-100 pt-4">
+              <label className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-600">Matches per item<select value={perItem} onChange={(event) => setPerItem(Number(event.target.value))} className="bg-transparent text-xs font-bold outline-none">{[3, 5, 10].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
               <input ref={bulkSearchInputRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={(event) => bulkSearchFromFile(event.target.files?.[0])} />
               <button onClick={() => bulkSearchInputRef.current?.click()} disabled={searching || bulkSearching || !stats.materials} className="flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 transition hover:border-emerald-400 hover:text-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{bulkSearching ? <LoaderCircle className="animate-spin" size={15} /> : <FileSpreadsheet size={15} />}{bulkSearching ? "Searching bulk list…" : "Or search a list from Excel/CSV (up to 200 items)"}</button>
               <a href="/search-list-sample.xlsx" download className="flex h-10 items-center gap-2 rounded-xl px-3 text-xs font-bold text-emerald-700 hover:text-emerald-900"><Download size={15} />Empty sample</a>
