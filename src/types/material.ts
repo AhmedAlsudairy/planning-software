@@ -9,6 +9,9 @@ export interface MaterialAttributes {
   subtypes: string[];
   sizeMm: number | null;
   sizeDisplay: string | null;
+  /** Part-number designation found in a search query, separators removed ("NU2322ECMAC3"). Set at
+   *  query time only; catalog rows are compared against it through their own text. */
+  modelNumber?: string | null;
   /** Second bore of a reducing fitting ("REDUCER 40x20", "TEE 3\" X 2\""). */
   sizeMm2: number | null;
   schedule: string | null;
@@ -97,6 +100,8 @@ export interface SearchResponse {
   parsedQuery: MaterialAttributes;
   matches: MaterialMatch[];
   semanticMode: "gemini" | "lexical-fallback";
+  /** Part number the catalogue spells one slip differently from the query, when none matched exactly. */
+  didYouMean?: string | null;
   warnings: string[];
   elapsedMs: number;
 }

@@ -1,5 +1,6 @@
 import { areRelatedItemTypes } from "@/lib/vocabulary";
 import { isBlockedStatus } from "@/lib/normalization";
+import { compact, matchModel, type ModelMatch, type ModelQuery } from "@/lib/partnumber";
 import type { AttributeComparison, MaterialAttributes, MaterialCandidate, MaterialMatch, MatchState } from "@/types/material";
 
 interface ScoredAttribute {
@@ -194,21 +195,31 @@ function evaluate(query: MaterialAttributes, candidate: MaterialCandidate): Eval
   return { attributes, parametric, penalty };
 }
 
-export function shortlistCandidates(query: MaterialAttributes, candidates: MaterialCandidate[], size: number): MaterialCandidate[] {
+const NO_MODEL_MATCH: ModelMatch = { kind: "none", score: 0, found: null };
+
+/** How the row's own text agrees with a pasted part number; separators never matter. */
+export function modelMatchFor(model: ModelQuery | null, candidate: MaterialCandidate): ModelMatch {
+  return model ? matchModel(model, compact(`${candidate.shortDescription} ${candidate.longDescription}`)) : NO_MODEL_MATCH;
+}
+
+export function shortlistCandidates(query: MaterialAttributes, candidates: MaterialCandidate[], size: number, model: ModelQuery | null = null): MaterialCandidate[] {
   return candidates
     .filter((candidate) => !isUnwantedSpare(query, candidate))
     .map((candidate) => {
       const { parametric, penalty } = evaluate(query, candidate);
       const lexical = Math.max(candidate.lexicalScore, candidate.fuzzyScore);
       const score = (parametric * 0.85 + lexical * 0.15) * penalty;
-      return { candidate, score: candidate.exactMatch ? score + 1 : score };
+      const part = modelMatchFor(model, candidate);
+      // A part number carried by the row (or one slip away from it) outranks any amount of word overlap.
+      const lift = part.kind === "exact" ? 2 : part.kind === "close" ? 0.5 * part.score : 0;
+      return { candidate, score: candidate.exactMatch ? score + 1 : score + lift };
     })
     .sort((left, right) => right.score - left.score)
     .slice(0, size)
     .map((entry) => entry.candidate);
 }
 
-export function rankCandidates(query: MaterialAttributes, candidates: MaterialCandidate[], queryEmbedding: number[] | null, limit: number): MaterialMatch[] {
+export function rankCandidates(query: MaterialAttributes, candidates: MaterialCandidate[], queryEmbedding: number[] | null, limit: number, model: ModelQuery | null = null): MaterialMatch[] {
   const scored = candidates
     .filter((candidate) => !isUnwantedSpare(query, candidate))
     .map((candidate) => {
@@ -217,7 +228,12 @@ export function rankCandidates(query: MaterialAttributes, candidates: MaterialCa
       const semantic = embeddingScore ?? Math.min(1, candidate.fuzzyScore * 0.65 + candidate.lexicalScore * 0.35);
       // Naming the material's own code or repeating its description verbatim is not a similarity
       // judgement - the user has already identified the row, so it is reported as a certainty.
-      const finalScore = candidate.exactMatch ? 1 : (parametric * 0.7 + semantic * 0.3) * penalty;
+      const part = modelMatchFor(model, candidate);
+      // The whole designation in the row's text identifies it. One slip away is a different part, so it
+      // is capped below the "confident" range rather than lifted.
+      const modelExact = part.kind === "exact";
+      let finalScore = candidate.exactMatch || modelExact ? 1 : (parametric * 0.7 + semantic * 0.3) * penalty;
+      if (part.kind === "close") finalScore = Math.min(finalScore, 0.84);
       const comparisons: AttributeComparison[] = attributes.map(({ key, label, query: requested, candidate: offered, score, state }) => ({ key, label, query: requested || "—", candidate: offered || "Not specified", score: Math.round(score * 100), state }));
       return {
         rank: 0,
@@ -232,7 +248,7 @@ export function rankCandidates(query: MaterialAttributes, candidates: MaterialCa
         status: candidate.status,
         statusDescription: candidate.statusDescription,
         blocked: isBlockedStatus(candidate.status),
-        exactMatch: Boolean(candidate.exactMatch),
+        exactMatch: Boolean(candidate.exactMatch) || modelExact,
         confidence: Math.round(finalScore * 1000) / 10,
         parametricScore: Math.round(parametric * 1000) / 10,
         semanticScore: Math.round(semantic * 1000) / 10,

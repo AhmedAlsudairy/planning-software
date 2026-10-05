@@ -81,6 +81,7 @@ export async function extractQueryAttributes(query: string, deterministic: Mater
     subtypes: [...new Set([...deterministic.subtypes, clean(extracted.subtype)].filter((value): value is string => Boolean(value)))],
     sizeMm: deterministic.sizeMm ?? extracted.sizeMm,
     sizeDisplay: deterministic.sizeDisplay || clean(extracted.sizeDisplay),
+    modelNumber: deterministic.modelNumber,
     sizeMm2: deterministic.sizeMm2 ?? extracted.sizeMm2,
     schedule: deterministic.schedule || clean(extracted.schedule),
     wallThicknessMm: deterministic.wallThicknessMm ?? extracted.wallThicknessMm,

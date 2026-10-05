@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { buildDashboardInsights, percentage } from "@/lib/dashboard";
 import { deriveSubtypeVocabulary } from "@/lib/normalization";
+import type { ModelQuery } from "@/lib/partnumber";
 import { buildSearchText, expandAbbreviations } from "@/lib/vocabulary";
 import type { ClassQualityItem, DashboardAnalytics, DashboardSummary, DistributionItem, MissingPattern, PlantHealthItem, QualityMetric } from "@/types/dashboard";
 import type { MaterialAttributes, MaterialCandidate, MaterialImportRow } from "@/types/material";
@@ -71,6 +72,9 @@ export async function ensureSchema(): Promise<void> {
         upload_id text NOT NULL REFERENCES material_uploads(id),
         updated_at timestamptz NOT NULL DEFAULT now(),
         search_doc text GENERATED ALWAYS AS (lower(normalized_text)) STORED,
+        search_compact text GENERATED ALWAYS AS (
+          regexp_replace(upper(short_description || ' ' || long_description), '[^A-Za-z0-9]', '', 'g')
+        ) STORED,
         search_tsv tsvector GENERATED ALWAYS AS (
           setweight(to_tsvector('simple'::regconfig, normalized_short), 'A') ||
           setweight(to_tsvector('simple'::regconfig, normalized_text), 'B')
@@ -104,6 +108,11 @@ export async function ensureSchema(): Promise<void> {
     await sql`ALTER TABLE materials DROP COLUMN IF EXISTS search_vector`;
     await sql`ALTER TABLE materials DROP COLUMN IF EXISTS status_rank`;
     await sql`ALTER TABLE materials ADD COLUMN IF NOT EXISTS search_doc text GENERATED ALWAYS AS (lower(normalized_text)) STORED`;
+    // Descriptions and part numbers with every separator removed, so "NU 2232 ECMA/C3",
+    // "NU2232ECMA/C3" and "NU-2232-ECMA-C3" all contain the same "NU2232ECMAC3".
+    await sql`ALTER TABLE materials ADD COLUMN IF NOT EXISTS search_compact text GENERATED ALWAYS AS (
+      regexp_replace(upper(short_description || ' ' || long_description), '[^A-Za-z0-9]', '', 'g')
+    ) STORED`;
     await sql`ALTER TABLE materials ADD COLUMN IF NOT EXISTS search_tsv tsvector GENERATED ALWAYS AS (
       setweight(to_tsvector('simple'::regconfig, normalized_short), 'A') ||
       setweight(to_tsvector('simple'::regconfig, normalized_text), 'B')
@@ -119,6 +128,7 @@ export async function ensureSchema(): Promise<void> {
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS materials_upload_identity_idx ON materials(upload_id, corporate_no, sap_no, plant)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_search_tsv_idx ON materials USING gin(search_tsv)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_search_doc_trgm_idx ON materials USING gin(search_doc gin_trgm_ops)`;
+    await sql`CREATE INDEX IF NOT EXISTS materials_search_compact_trgm_idx ON materials USING gin(search_compact gin_trgm_ops)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_item_type_idx ON materials(upload_id, status_active, item_type)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_sap_no_idx ON materials(upload_id, sap_no)`;
     await sql`CREATE INDEX IF NOT EXISTS materials_size_idx ON materials(upload_id, status_active, ((attributes->>'sizeMm')::double precision))`;
@@ -333,8 +343,18 @@ const CANDIDATE_SQL = `WITH base AS (
   code_arm AS (
     SELECT id FROM base
     WHERE $8::text <> ''
-      AND (sap_no = $8 OR upper(corporate_no) = $8 OR sap_no LIKE '%' || $8 || '%' OR upper(corporate_no) LIKE '%' || $8 || '%')
+      AND (
+        (ltrim($8, '0') <> '' AND ltrim(sap_no, '0') = ltrim($8, '0'))
+        OR upper(corporate_no) = $8
+        -- A partial code is only a lookup when long enough to be a code rather than a size or a year.
+        OR (length($8) >= 6 AND (sap_no LIKE '%' || $8 || '%' OR upper(corporate_no) LIKE '%' || $8 || '%'))
+      )
     LIMIT 100
+  ),
+  partnumber_arm AS (
+    SELECT id FROM base
+    WHERE cardinality($11::text[]) > 0 AND search_compact LIKE ANY($11::text[])
+    LIMIT $9
   ),
   lexical_arm AS (
     SELECT id FROM base
@@ -360,10 +380,19 @@ const CANDIDATE_SQL = `WITH base AS (
     UNION SELECT id FROM lexical_arm
     UNION SELECT id FROM trigram_arm
     UNION SELECT id FROM attribute_arm
+    UNION SELECT id FROM partnumber_arm
   ),
   scored AS (
     SELECT b.*,
-      (($8::text <> '' AND (b.sap_no = $8 OR upper(b.corporate_no) = $8)) OR lower(b.short_description) = lower($1)) AS exact_match,
+      (($8::text <> '' AND ((ltrim($8, '0') <> '' AND ltrim(b.sap_no, '0') = ltrim($8, '0')) OR upper(b.corporate_no) = $8)) OR lower(b.short_description) = lower($1)) AS exact_match,
+      -- A pasted part number is a far stronger signal than any word overlap, so a row carrying the
+      -- whole designation is lifted into the candidate pool ahead of lookalikes; a row carrying only
+      -- a piece of it gets a smaller lift. The matcher then scores exactly how close each one is.
+      (CASE
+        WHEN $12::text <> '' AND b.search_compact LIKE $12 THEN 1.0
+        WHEN cardinality($11::text[]) > 0 AND b.search_compact LIKE ANY($11::text[]) THEN 0.35
+        ELSE 0
+      END) AS model_bonus,
       ts_rank_cd(b.search_tsv, to_tsquery('simple', $2)) AS raw_lexical,
       word_similarity(lower($1), b.search_doc) AS fuzzy_score,
       -- These weights sum to 1.0 so the result is directly comparable with the text scores below.
@@ -383,7 +412,7 @@ const CANDIDATE_SQL = `WITH base AS (
   ranked AS (
     SELECT s.*,
       CASE WHEN s.exact_match THEN 10
-        ELSE 0.45 * s.engineering_score
+        ELSE s.model_bonus + 0.45 * s.engineering_score
            + 0.30 * (s.raw_lexical / (1 + s.raw_lexical))
            + 0.25 * s.fuzzy_score
       END AS final_score,
@@ -412,7 +441,7 @@ function normalizedLexical(rank: number): number {
   return rank <= 0 ? 0 : rank / (1 + rank);
 }
 
-export async function findCandidates(query: string, attributes: MaterialAttributes, limit = 24): Promise<MaterialCandidate[]> {
+export async function findCandidates(query: string, attributes: MaterialAttributes, limit = 24, model: ModelQuery | null = null): Promise<MaterialCandidate[]> {
   await ensureSchema();
   const sql = getSql();
   const rows = await sql.query(CANDIDATE_SQL, [
@@ -426,6 +455,8 @@ export async function findCandidates(query: string, attributes: MaterialAttribut
     extractCodeToken(query),
     Math.max(limit * 3, 150),
     limit,
+    (model?.spans ?? []).map((span) => `%${span}%`),
+    model ? `%${model.primary}%` : "",
   ]);
   return rows.map((row) => ({
     id: String(row.id),

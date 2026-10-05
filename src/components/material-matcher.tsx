@@ -173,8 +173,8 @@ export default function MaterialMatcher() {
     }
   };
 
-  const search = async () => {
-    const items = [...new Set(query.split("\n").map((line) => line.trim()).filter((line) => line.length >= 3))];
+  const search = async (override?: string) => {
+    const items = [...new Set((override ?? query).split("\n").map((line) => line.trim()).filter((line) => line.length >= 3))];
     if (!items.length) return setError("Enter a material specification (one per line for multiple searches)");
     setSearching(true);
     setError("");
@@ -268,7 +268,7 @@ export default function MaterialMatcher() {
             <div className="mb-4 flex items-center justify-between"><div><span className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-700">Step 02</span><h2 className="mt-1 text-xl font-bold">Target specification</h2></div><Search className="text-slate-300" /></div>
             <textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Describe item type, size, pressure, connection, materials and standards… (one specification per line to search several at once)" className="h-36 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 outline-none transition placeholder:text-slate-400 focus:border-emerald-600 focus:bg-white focus:ring-4 focus:ring-emerald-600/10" />
             <div className="mt-3 flex items-center justify-end gap-4"><span className="text-xs text-slate-400">{query.length}/2,000</span></div>
-            <button onClick={search} disabled={searching || bulkSearching || query.trim().length < 3 || !stats.materials} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{searching ? <LoaderCircle className="animate-spin" size={18} /> : <Sparkles size={18} />}{searching ? "Parsing and ranking candidates…" : "Find matching materials"}<ArrowRight size={17} /></button>
+            <button onClick={() => search()} disabled={searching || bulkSearching || query.trim().length < 3 || !stats.materials} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-700 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{searching ? <LoaderCircle className="animate-spin" size={18} /> : <Sparkles size={18} />}{searching ? "Parsing and ranking candidates…" : "Find matching materials"}<ArrowRight size={17} /></button>
             <div className="mt-4 flex items-center gap-3 border-t border-slate-100 pt-4">
               <input ref={bulkSearchInputRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={(event) => bulkSearchFromFile(event.target.files?.[0])} />
               <button onClick={() => bulkSearchInputRef.current?.click()} disabled={searching || bulkSearching || !stats.materials} className="flex h-10 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 transition hover:border-emerald-400 hover:text-emerald-800 disabled:cursor-not-allowed disabled:opacity-40">{bulkSearching ? <LoaderCircle className="animate-spin" size={15} /> : <FileSpreadsheet size={15} />}{bulkSearching ? "Searching bulk list…" : "Or search a list from Excel/CSV (up to 200 items)"}</button>
@@ -296,6 +296,7 @@ export default function MaterialMatcher() {
                 </div>
                 <div className="mt-3"><AttributePills attributes={result.parsedQuery} /></div>
                 <p className="mt-3 text-xs text-slate-400">{result.semanticMode === "gemini" ? "Gemini semantic ranking" : "Lexical fallback"} · {result.elapsedMs.toLocaleString()} ms</p>
+                {result.didYouMean && <div className="mt-2 flex items-center gap-2 text-xs text-amber-700"><TriangleAlert size={14} />No exact match for that part number. Did you mean <button type="button" onClick={() => { setQuery(result.didYouMean!); void search(result.didYouMean!); }} className="font-bold underline">{result.didYouMean}</button>?</div>}
                 {result.warnings.map((warning) => <div key={warning} className="mt-2 flex items-center gap-2 text-xs text-amber-700"><TriangleAlert size={14} />{warning}</div>)}
               </div>
               {result.matches.length ? <div className="space-y-4">{result.matches.map((match) => <MatchCard key={match.id} match={match} />)}</div> : <div className="rounded-2xl border border-slate-200 bg-white p-12 text-center"><AlertCircle className="mx-auto text-slate-300" size={36} /><h3 className="mt-4 font-bold">No eligible matches found</h3><p className="mt-1 text-sm text-slate-500">Try a broader item description or upload additional material records.</p></div>}
